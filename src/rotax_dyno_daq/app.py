@@ -318,6 +318,7 @@ def main() -> int:
         4. Create new HAT readers with updated channels
         5. Start new readers
         6. Update StripChartPanel with new channels
+        7. Update HAT count in status bar
         """
         nonlocal hat_readers
 
@@ -386,6 +387,9 @@ def main() -> int:
                 )
         logger.info("StripChartPanel updated with new channels.")
 
+        # 7. Update HAT count in status bar
+        dashboard.set_hat_count(len(hat_readers))
+
     hardware_setup_panel.on_config_applied = _on_hardware_config_applied
 
     # Select first tab
@@ -397,29 +401,48 @@ def main() -> int:
             f"Config: {config_manager.load_error} — using defaults", 10000
         )
 
-    # --- Smoothing control in status bar ---
-    from PyQt6.QtWidgets import QLabel, QSpinBox
-
-    # EMA smoothing state
+    # --- EMA smoothing state ---
     _ema_state: dict[str, float] = {}
     _ema_alpha = [0.3]  # Mutable container so lambda can modify
 
-    smoothing_label = QLabel("EMA α:")
-    smoothing_label.setStyleSheet("QLabel { padding: 4px; }")
-    dashboard.statusBar().addPermanentWidget(smoothing_label)
+    # Connect EMA alpha from hardware setup panel
+    hardware_setup_panel.on_ema_changed = lambda val: _ema_alpha.__setitem__(0, val)
 
-    smoothing_spinbox = QSpinBox()
-    smoothing_spinbox.setRange(1, 10)
-    smoothing_spinbox.setValue(3)
-    smoothing_spinbox.setToolTip(
-        "EMA smoothing factor (1=very smooth, 10=no smoothing)"
-    )
-    smoothing_spinbox.valueChanged.connect(
-        lambda val: _ema_alpha.__setitem__(0, val / 10.0)
-    )
-    dashboard.statusBar().addPermanentWidget(smoothing_spinbox)
+    # --- Wire new status bar indicators ---
+
+    # HAT count
+    dashboard.set_hat_count(len(hat_readers))
+
+    # Cloud status
+    dashboard.set_cloud_status(cloud_uploader is not None)
 
     dashboard.show()
+
+    # --- Status bar periodic updates ---
+    from PyQt6.QtCore import QTimer as QtTimer
+
+    def _update_status_bar() -> None:
+        """Periodically update the status bar indicators."""
+        # HAT count
+        dashboard.set_hat_count(len(hat_readers))
+
+        # Cloud status
+        dashboard.set_cloud_status(cloud_uploader is not None)
+
+        # Alarm status
+        active_alarms = alarm_manager.get_active_alarms()
+        if active_alarms:
+            dashboard.set_alarm_status(active=True, channel=active_alarms[0].channel_id)
+        else:
+            dashboard.set_alarm_status(active=False)
+
+        # Log status
+        dashboard.set_log_status(csv_logger.is_active)
+
+    status_timer = QtTimer()
+    status_timer.setInterval(2000)
+    status_timer.timeout.connect(_update_status_bar)
+    status_timer.start()
 
     # --- 12. Wire DataBus subscriptions (BEFORE starting readers) ---
 

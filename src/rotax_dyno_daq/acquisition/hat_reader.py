@@ -27,13 +27,30 @@ logger = logging.getLogger(__name__)
 DAQHATS_AVAILABLE = False
 mcc134: Any = None
 mcc118: Any = None
+TcTypes: Any = None
 
 try:
     from daqhats import mcc134, mcc118  # type: ignore[import-not-found,no-redef]
+    from daqhats import TcTypes as _TcTypes  # type: ignore[import-not-found]
 
+    TcTypes = _TcTypes
     DAQHATS_AVAILABLE = True
 except ImportError:
     pass
+
+
+# Mapping from string TC type names to daqhats TcTypes enum values
+TC_TYPE_MAP: dict[str, Any] = {}
+if DAQHATS_AVAILABLE and TcTypes is not None:
+    TC_TYPE_MAP = {
+        "K": TcTypes.TYPE_K,
+        "J": TcTypes.TYPE_J,
+        "T": TcTypes.TYPE_T,
+        "E": TcTypes.TYPE_E,
+        "R": TcTypes.TYPE_R,
+        "S": TcTypes.TYPE_S,
+        "N": TcTypes.TYPE_N,
+    }
 
 
 # --- Hardware abstraction protocols for mock-friendly design ---
@@ -257,11 +274,14 @@ class ThermocoupleReader(HatReader):
 
     Reads thermocouple temperatures with cold junction compensation.
     Detects open-circuit faults (TC_OPEN status) and marks samples as INVALID.
+    Supports per-channel thermocouple type configuration (K, J, T, E, R, S, N).
 
     Args:
         address: The HAT board address (0-7).
         channels: List of channel configurations for this HAT.
         data_bus: The data bus to publish samples to.
+        tc_types: Optional mapping of hat_channel -> TC type string (e.g. "K", "J").
+            If not provided, defaults to TYPE_K for all channels.
     """
 
     def __init__(
@@ -269,6 +289,7 @@ class ThermocoupleReader(HatReader):
         address: int,
         channels: list[ChannelConfig],
         data_bus: DataBus,
+        tc_types: dict[int, str] | None = None,
     ) -> None:
         super().__init__(address=address, channels=channels, data_bus=data_bus)
         self._hat: Any = None
@@ -282,6 +303,41 @@ class ThermocoupleReader(HatReader):
                     address,
                     e,
                 )
+
+        # Apply thermocouple type configuration per channel
+        if self._hat is not None and TC_TYPE_MAP:
+            for ch_config in channels:
+                tc_type_str = "K"  # default
+                if tc_types and ch_config.hat_channel in tc_types:
+                    tc_type_str = tc_types[ch_config.hat_channel]
+                else:
+                    # Try to extract from display_name "[tc=X]" pattern
+                    display = ch_config.display_name or ""
+                    if "[tc=" in display:
+                        try:
+                            start = display.index("[tc=") + 4
+                            end = display.index("]", start)
+                            tc_type_str = display[start:end]
+                        except (ValueError, IndexError):
+                            pass
+
+                tc_enum = TC_TYPE_MAP.get(tc_type_str)
+                if tc_enum is not None:
+                    try:
+                        self._hat.tc_type_write(ch_config.hat_channel, tc_enum)
+                        logger.info(
+                            "Set MCC 134 addr=%d ch=%d tc_type=%s",
+                            address,
+                            ch_config.hat_channel,
+                            tc_type_str,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to set tc_type for addr=%d ch=%d: %s",
+                            address,
+                            ch_config.hat_channel,
+                            e,
+                        )
 
     def read_sample(self, channel: int | ChannelConfig) -> RawSample:
         """Read a thermocouple temperature from the MCC 134.

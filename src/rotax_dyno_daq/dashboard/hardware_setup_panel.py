@@ -2,7 +2,8 @@
 
 Provides auto-detection of MCC DAQ HATs, live voltage preview,
 channel-to-measurement assignment, inline calibration configuration,
-sensor preset selection, and save/apply functionality.
+sensor preset selection, thermocouple type selection for MCC 134,
+EMA smoothing control, and save/apply functionality.
 """
 
 from __future__ import annotations
@@ -149,6 +150,9 @@ SENSOR_PRESETS: list[SensorPreset] = [
 ]
 
 SENSOR_PRESET_NAMES = [p.name for p in SENSOR_PRESETS]
+
+# Thermocouple type options for MCC 134
+TC_TYPES = ["K", "J", "T", "E", "R", "S", "N"]
 
 
 @dataclass
@@ -340,6 +344,9 @@ class HardwareSetupPanel(QWidget):
         # Callback invoked after Save & Apply succeeds — app.py sets this
         self._on_config_applied_callback: Optional[Callable[[], None]] = None
 
+        # Callback invoked when EMA alpha changes — app.py sets this
+        self._on_ema_changed: Optional[Callable[[float], None]] = None
+
         self._setup_ui()
         self._setup_timer()
 
@@ -352,6 +359,21 @@ class HardwareSetupPanel(QWidget):
     def on_config_applied(self, callback: Optional[Callable[[], None]]) -> None:
         """Set the callback invoked after configuration is saved and applied."""
         self._on_config_applied_callback = callback
+
+    @property
+    def on_ema_changed(self) -> Optional[Callable[[float], None]]:
+        """Callback invoked when EMA alpha value changes."""
+        return self._on_ema_changed
+
+    @on_ema_changed.setter
+    def on_ema_changed(self, callback: Optional[Callable[[float], None]]) -> None:
+        """Set the callback invoked when EMA alpha value changes."""
+        self._on_ema_changed = callback
+
+    @property
+    def ema_alpha(self) -> float:
+        """Current EMA smoothing alpha value."""
+        return self._ema_spinbox.value()
 
     def _setup_ui(self) -> None:
         """Build the panel UI layout."""
@@ -370,6 +392,23 @@ class HardwareSetupPanel(QWidget):
         header_layout.addWidget(title_label)
 
         header_layout.addStretch()
+
+        # EMA Smoothing spinbox
+        ema_label = QLabel("EMA Smoothing (α):")
+        ema_label.setStyleSheet("QLabel { padding: 4px; }")
+        header_layout.addWidget(ema_label)
+
+        self._ema_spinbox = QDoubleSpinBox()
+        self._ema_spinbox.setRange(0.1, 1.0)
+        self._ema_spinbox.setSingleStep(0.1)
+        self._ema_spinbox.setDecimals(1)
+        self._ema_spinbox.setValue(0.3)
+        self._ema_spinbox.setToolTip(
+            "EMA smoothing factor (0.1=very smooth, 1.0=no smoothing)"
+        )
+        self._ema_spinbox.setMinimumHeight(MIN_TOUCH_TARGET_PX)
+        self._ema_spinbox.valueChanged.connect(self._on_ema_alpha_changed)
+        header_layout.addWidget(self._ema_spinbox)
 
         # Scan button
         self._scan_btn = QPushButton("Scan Hardware")
@@ -418,13 +457,14 @@ class HardwareSetupPanel(QWidget):
 
         # Channel table
         self._table = QTableWidget()
-        self._table.setColumnCount(11)
+        self._table.setColumnCount(12)
         self._table.setHorizontalHeaderLabels([
             "HAT Type",
             "Address",
             "Channel",
             "Live Voltage",
             "Assigned To",
+            "TC Type",
             "Sensor Preset",
             "Unit",
             "Cal Type",
@@ -549,6 +589,7 @@ class HardwareSetupPanel(QWidget):
         self._status_label.setStyleSheet("QLabel { color: #090; padding: 4px; }")
 
         self._populate_table()
+        self._restore_assignments_from_config()
         self._save_btn.setEnabled(len(self._detected_channels) > 0)
         self._start_live_readings()
 
@@ -583,6 +624,17 @@ class HardwareSetupPanel(QWidget):
             combo.setMinimumHeight(MIN_TOUCH_TARGET_PX)
             self._table.setCellWidget(row, 4, combo)
 
+            # TC Type (dropdown) — only meaningful for MCC 134
+            tc_combo = QComboBox()
+            if det_ch.hat_type == "MCC 134":
+                tc_combo.addItems(TC_TYPES)
+                tc_combo.setCurrentIndex(0)  # Default: K
+            else:
+                tc_combo.addItem("N/A")
+                tc_combo.setEnabled(False)
+            tc_combo.setMinimumHeight(MIN_TOUCH_TARGET_PX)
+            self._table.setCellWidget(row, 5, tc_combo)
+
             # Sensor Preset (dropdown) — auto-fills slope/offset/unit
             preset_combo = QComboBox()
             preset_combo.addItems(SENSOR_PRESET_NAMES)
@@ -590,19 +642,19 @@ class HardwareSetupPanel(QWidget):
             preset_combo.currentIndexChanged.connect(
                 lambda index, r=row: self._on_preset_changed(r, index)
             )
-            self._table.setCellWidget(row, 5, preset_combo)
+            self._table.setCellWidget(row, 6, preset_combo)
 
             # Unit
             unit_edit = QLineEdit("V")
             unit_edit.setMinimumHeight(MIN_TOUCH_TARGET_PX)
             unit_edit.setPlaceholderText("Unit")
-            self._table.setCellWidget(row, 6, unit_edit)
+            self._table.setCellWidget(row, 7, unit_edit)
 
             # Calibration Type
             cal_combo = QComboBox()
             cal_combo.addItems(["linear", "lookup_table"])
             cal_combo.setMinimumHeight(MIN_TOUCH_TARGET_PX)
-            self._table.setCellWidget(row, 7, cal_combo)
+            self._table.setCellWidget(row, 8, cal_combo)
 
             # Slope
             slope_spin = QDoubleSpinBox()
@@ -610,7 +662,7 @@ class HardwareSetupPanel(QWidget):
             slope_spin.setDecimals(4)
             slope_spin.setValue(1.0)
             slope_spin.setMinimumHeight(MIN_TOUCH_TARGET_PX)
-            self._table.setCellWidget(row, 8, slope_spin)
+            self._table.setCellWidget(row, 9, slope_spin)
 
             # Offset
             offset_spin = QDoubleSpinBox()
@@ -618,13 +670,13 @@ class HardwareSetupPanel(QWidget):
             offset_spin.setDecimals(4)
             offset_spin.setValue(0.0)
             offset_spin.setMinimumHeight(MIN_TOUCH_TARGET_PX)
-            self._table.setCellWidget(row, 9, offset_spin)
+            self._table.setCellWidget(row, 10, offset_spin)
 
             # Action — clear assignment button
             clear_btn = QPushButton("Clear")
             clear_btn.setMinimumSize(MIN_TOUCH_TARGET_PX, MIN_TOUCH_TARGET_PX)
             clear_btn.clicked.connect(lambda checked, r=row: self._clear_row(r))
-            self._table.setCellWidget(row, 10, clear_btn)
+            self._table.setCellWidget(row, 11, clear_btn)
 
         # Set row heights for touch targets
         for row in range(self._table.rowCount()):
@@ -651,20 +703,20 @@ class HardwareSetupPanel(QWidget):
             dialog = CustomSensorDialog(self)
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 # Fill calculated slope/offset/unit into the row
-                slope_spin = self._table.cellWidget(row, 8)
+                slope_spin = self._table.cellWidget(row, 9)
                 if isinstance(slope_spin, QDoubleSpinBox):
                     slope_spin.setValue(dialog.slope)
 
-                offset_spin = self._table.cellWidget(row, 9)
+                offset_spin = self._table.cellWidget(row, 10)
                 if isinstance(offset_spin, QDoubleSpinBox):
                     offset_spin.setValue(dialog.offset)
 
-                unit_edit = self._table.cellWidget(row, 6)
+                unit_edit = self._table.cellWidget(row, 7)
                 if isinstance(unit_edit, QLineEdit):
                     unit_edit.setText(dialog.unit)
             else:
                 # User cancelled — revert to "(custom)" preset
-                preset_combo = self._table.cellWidget(row, 5)
+                preset_combo = self._table.cellWidget(row, 6)
                 if isinstance(preset_combo, QComboBox):
                     preset_combo.blockSignals(True)
                     preset_combo.setCurrentIndex(0)
@@ -672,17 +724,17 @@ class HardwareSetupPanel(QWidget):
             return
 
         # Auto-fill slope
-        slope_spin = self._table.cellWidget(row, 8)
+        slope_spin = self._table.cellWidget(row, 9)
         if isinstance(slope_spin, QDoubleSpinBox):
             slope_spin.setValue(preset.slope)
 
         # Auto-fill offset
-        offset_spin = self._table.cellWidget(row, 9)
+        offset_spin = self._table.cellWidget(row, 10)
         if isinstance(offset_spin, QDoubleSpinBox):
             offset_spin.setValue(preset.offset)
 
         # Auto-fill unit
-        unit_edit = self._table.cellWidget(row, 6)
+        unit_edit = self._table.cellWidget(row, 7)
         if isinstance(unit_edit, QLineEdit):
             unit_edit.setText(preset.unit)
 
@@ -692,25 +744,78 @@ class HardwareSetupPanel(QWidget):
         if isinstance(combo, QComboBox):
             combo.setCurrentIndex(0)
 
-        preset_combo = self._table.cellWidget(row, 5)
+        tc_combo = self._table.cellWidget(row, 5)
+        if isinstance(tc_combo, QComboBox) and tc_combo.isEnabled():
+            tc_combo.setCurrentIndex(0)
+
+        preset_combo = self._table.cellWidget(row, 6)
         if isinstance(preset_combo, QComboBox):
             preset_combo.setCurrentIndex(0)
 
-        unit_edit = self._table.cellWidget(row, 6)
+        unit_edit = self._table.cellWidget(row, 7)
         if isinstance(unit_edit, QLineEdit):
             unit_edit.setText("V")
 
-        cal_combo = self._table.cellWidget(row, 7)
+        cal_combo = self._table.cellWidget(row, 8)
         if isinstance(cal_combo, QComboBox):
             cal_combo.setCurrentIndex(0)
 
-        slope_spin = self._table.cellWidget(row, 8)
+        slope_spin = self._table.cellWidget(row, 9)
         if isinstance(slope_spin, QDoubleSpinBox):
             slope_spin.setValue(1.0)
 
-        offset_spin = self._table.cellWidget(row, 9)
+        offset_spin = self._table.cellWidget(row, 10)
         if isinstance(offset_spin, QDoubleSpinBox):
             offset_spin.setValue(0.0)
+
+    def _restore_assignments_from_config(self) -> None:
+        """Pre-fill table with existing channel assignments from config."""
+        if self._config_manager is None:
+            return
+        config = self._config_manager.config
+        # Build a lookup: (hat_address, hat_channel) -> ChannelConfig
+        saved: dict[tuple[int, int], ChannelConfig] = {}
+        for ch in config.channels:
+            saved[(ch.hat_address, ch.hat_channel)] = ch
+
+        for row, det_ch in enumerate(self._detected_channels):
+            key = (det_ch.address, det_ch.channel)
+            if key not in saved:
+                continue
+            ch_config = saved[key]
+
+            # Set "Assigned To" dropdown (column 4)
+            combo = self._table.cellWidget(row, 4)
+            if isinstance(combo, QComboBox):
+                idx = combo.findText(ch_config.channel_id)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+
+            # Set Unit (column 7)
+            unit_edit = self._table.cellWidget(row, 7)
+            if isinstance(unit_edit, QLineEdit):
+                unit_edit.setText(ch_config.calibration.unit_label)
+
+            # Set Slope (column 9)
+            slope_spin = self._table.cellWidget(row, 9)
+            if isinstance(slope_spin, QDoubleSpinBox):
+                if ch_config.calibration.linear_params:
+                    slope_spin.setValue(ch_config.calibration.linear_params.slope)
+
+            # Set Offset (column 10)
+            offset_spin = self._table.cellWidget(row, 10)
+            if isinstance(offset_spin, QDoubleSpinBox):
+                if ch_config.calibration.linear_params:
+                    offset_spin.setValue(ch_config.calibration.linear_params.offset)
+
+    def _on_ema_alpha_changed(self, value: float) -> None:
+        """Handle EMA alpha spinbox value change.
+
+        Args:
+            value: The new alpha value from the spinbox.
+        """
+        if self._on_ema_changed is not None:
+            self._on_ema_changed(value)
 
     def _start_live_readings(self) -> None:
         """Start the live voltage reading timer."""
@@ -777,20 +882,26 @@ class HardwareSetupPanel(QWidget):
             if measurement == "(unassigned)":
                 continue
 
+            # Get TC type (for MCC 134 channels)
+            tc_type_str = "K"
+            tc_combo = self._table.cellWidget(row, 5)
+            if isinstance(tc_combo, QComboBox) and tc_combo.isEnabled():
+                tc_type_str = tc_combo.currentText()
+
             # Get unit
-            unit_edit = self._table.cellWidget(row, 6)
+            unit_edit = self._table.cellWidget(row, 7)
             unit = unit_edit.text() if isinstance(unit_edit, QLineEdit) else "V"
 
             # Get calibration type
-            cal_combo = self._table.cellWidget(row, 7)
+            cal_combo = self._table.cellWidget(row, 8)
             cal_type_str = cal_combo.currentText() if isinstance(cal_combo, QComboBox) else "linear"
             cal_type = CalibrationType(cal_type_str)
 
             # Get slope/offset
-            slope_spin = self._table.cellWidget(row, 8)
+            slope_spin = self._table.cellWidget(row, 9)
             slope = slope_spin.value() if isinstance(slope_spin, QDoubleSpinBox) else 1.0
 
-            offset_spin = self._table.cellWidget(row, 9)
+            offset_spin = self._table.cellWidget(row, 10)
             offset = offset_spin.value() if isinstance(offset_spin, QDoubleSpinBox) else 0.0
 
             # Determine channel type from measurement
@@ -810,6 +921,13 @@ class HardwareSetupPanel(QWidget):
                 linear_params=LinearCalibrationParams(slope=slope, offset=offset),
             )
 
+            # Build channel config — store tc_type in display_name suffix for MCC 134
+            display_name = measurement
+            if det_ch.hat_type == "MCC 134" and tc_type_str != "K":
+                display_name = f"{measurement}[tc={tc_type_str}]"
+            elif det_ch.hat_type == "MCC 134":
+                display_name = f"{measurement}[tc=K]"
+
             # Build channel config
             channel_config = ChannelConfig(
                 channel_id=measurement,
@@ -818,7 +936,7 @@ class HardwareSetupPanel(QWidget):
                 hat_channel=det_ch.channel,
                 sample_rate_hz=sample_rate,
                 calibration=calibration,
-                display_name=measurement,
+                display_name=display_name,
                 enabled=True,
             )
             channels.append(channel_config)
@@ -869,6 +987,94 @@ class HardwareSetupPanel(QWidget):
                     "Restart Warning",
                     f"Configuration saved but reader restart failed:\n{e}",
                 )
+
+    def _restore_assignments_from_config(self) -> None:
+        """Restore channel assignments from the current config after a scan.
+
+        For each configured channel, finds the matching row (same hat_address
+        and hat_channel) and pre-fills the Assigned To dropdown, TC type,
+        unit, slope, and offset from the existing configuration.
+        """
+        if self._config_manager is None:
+            return
+
+        configured_channels = self._config_manager.config.channels
+        if not configured_channels:
+            return
+
+        for ch_config in configured_channels:
+            # Find the matching row by hat_address and hat_channel
+            for row, det_ch in enumerate(self._detected_channels):
+                if (
+                    det_ch.address == ch_config.hat_address
+                    and det_ch.channel == ch_config.hat_channel
+                ):
+                    # Pre-fill "Assigned To" dropdown
+                    combo = self._table.cellWidget(row, 4)
+                    if isinstance(combo, QComboBox):
+                        idx = combo.findText(ch_config.channel_id)
+                        if idx >= 0:
+                            combo.setCurrentIndex(idx)
+
+                    # Pre-fill TC Type for MCC 134 channels
+                    tc_combo = self._table.cellWidget(row, 5)
+                    if isinstance(tc_combo, QComboBox) and tc_combo.isEnabled():
+                        # Extract tc_type from display_name if stored as "EGT1[tc=K]"
+                        tc_type = "K"
+                        display = ch_config.display_name or ""
+                        if "[tc=" in display:
+                            start = display.index("[tc=") + 4
+                            end = display.index("]", start)
+                            tc_type = display[start:end]
+                        tc_idx = tc_combo.findText(tc_type)
+                        if tc_idx >= 0:
+                            tc_combo.setCurrentIndex(tc_idx)
+
+                    # Pre-fill unit
+                    unit_edit = self._table.cellWidget(row, 7)
+                    if isinstance(unit_edit, QLineEdit):
+                        unit_edit.setText(ch_config.calibration.unit_label)
+
+                    # Pre-fill calibration type
+                    cal_combo = self._table.cellWidget(row, 8)
+                    if isinstance(cal_combo, QComboBox):
+                        cal_idx = cal_combo.findText(
+                            ch_config.calibration.calibration_type.value
+                        )
+                        if cal_idx >= 0:
+                            cal_combo.setCurrentIndex(cal_idx)
+
+                    # Pre-fill slope
+                    slope_spin = self._table.cellWidget(row, 9)
+                    if isinstance(slope_spin, QDoubleSpinBox):
+                        if ch_config.calibration.linear_params is not None:
+                            slope_spin.setValue(
+                                ch_config.calibration.linear_params.slope
+                            )
+
+                    # Pre-fill offset
+                    offset_spin = self._table.cellWidget(row, 10)
+                    if isinstance(offset_spin, QDoubleSpinBox):
+                        if ch_config.calibration.linear_params is not None:
+                            offset_spin.setValue(
+                                ch_config.calibration.linear_params.offset
+                            )
+
+                    break  # Found the matching row, move to next config
+
+        logger.info(
+            "Restored assignments for %d configured channel(s).",
+            len(configured_channels),
+        )
+
+    def _on_ema_alpha_changed(self, value: float) -> None:
+        """Handle EMA alpha spinbox value change.
+
+        Args:
+            value: The new EMA alpha value.
+        """
+        if self._on_ema_changed is not None:
+            self._on_ema_changed(value)
 
     def _on_csv_dir_browse(self) -> None:
         """Open a directory chooser for the CSV log directory."""

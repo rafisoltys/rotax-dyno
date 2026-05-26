@@ -85,9 +85,9 @@ class TestHardwareSetupPanelInit:
         assert panel._status_label is not None
 
     def test_panel_has_table(self, panel):
-        """Panel should have a channel table with 11 columns."""
+        """Panel should have a channel table with 12 columns."""
         assert panel._table is not None
-        assert panel._table.columnCount() == 11
+        assert panel._table.columnCount() == 12
 
     def test_table_headers(self, panel):
         """Table should have correct column headers."""
@@ -97,6 +97,7 @@ class TestHardwareSetupPanelInit:
             "Channel",
             "Live Voltage",
             "Assigned To",
+            "TC Type",
             "Sensor Preset",
             "Unit",
             "Cal Type",
@@ -290,7 +291,7 @@ class TestHardwareSetupPanelTable:
 
         self._setup_panel_with_channels(panel)
 
-        preset_combo = panel._table.cellWidget(0, 5)
+        preset_combo = panel._table.cellWidget(0, 6)
         assert isinstance(preset_combo, QComboBox)
         assert preset_combo.count() == len(SENSOR_PRESET_NAMES)
         assert preset_combo.itemText(0) == "(custom)"
@@ -301,7 +302,7 @@ class TestHardwareSetupPanelTable:
 
         self._setup_panel_with_channels(panel)
 
-        unit_edit = panel._table.cellWidget(0, 6)
+        unit_edit = panel._table.cellWidget(0, 7)
         assert isinstance(unit_edit, QLineEdit)
         assert unit_edit.text() == "V"
 
@@ -311,7 +312,7 @@ class TestHardwareSetupPanelTable:
 
         self._setup_panel_with_channels(panel)
 
-        cal_combo = panel._table.cellWidget(0, 7)
+        cal_combo = panel._table.cellWidget(0, 8)
         assert isinstance(cal_combo, QComboBox)
         assert cal_combo.itemText(0) == "linear"
         assert cal_combo.itemText(1) == "lookup_table"
@@ -322,7 +323,7 @@ class TestHardwareSetupPanelTable:
 
         self._setup_panel_with_channels(panel)
 
-        slope_spin = panel._table.cellWidget(0, 8)
+        slope_spin = panel._table.cellWidget(0, 9)
         assert isinstance(slope_spin, QDoubleSpinBox)
         assert slope_spin.value() == 1.0
 
@@ -332,7 +333,7 @@ class TestHardwareSetupPanelTable:
 
         self._setup_panel_with_channels(panel)
 
-        offset_spin = panel._table.cellWidget(0, 9)
+        offset_spin = panel._table.cellWidget(0, 10)
         assert isinstance(offset_spin, QDoubleSpinBox)
         assert offset_spin.value() == 0.0
 
@@ -346,7 +347,7 @@ class TestHardwareSetupPanelTable:
         combo = panel._table.cellWidget(0, 4)
         combo.setCurrentIndex(1)  # Set to "OilP"
 
-        slope_spin = panel._table.cellWidget(0, 8)
+        slope_spin = panel._table.cellWidget(0, 9)
         slope_spin.setValue(5.0)
 
         # Clear the row
@@ -394,13 +395,13 @@ class TestHardwareSetupPanelSensorPresets:
 
         self._setup_panel_with_channels(panel)
 
-        preset_combo = panel._table.cellWidget(0, 5)
+        preset_combo = panel._table.cellWidget(0, 6)
         bosch_index = SENSOR_PRESET_NAMES.index("Bosch 0-10 bar")
         preset_combo.setCurrentIndex(bosch_index)
 
-        slope_spin = panel._table.cellWidget(0, 8)
-        offset_spin = panel._table.cellWidget(0, 9)
-        unit_edit = panel._table.cellWidget(0, 6)
+        slope_spin = panel._table.cellWidget(0, 9)
+        offset_spin = panel._table.cellWidget(0, 10)
+        unit_edit = panel._table.cellWidget(0, 7)
 
         assert isinstance(slope_spin, QDoubleSpinBox)
         assert isinstance(offset_spin, QDoubleSpinBox)
@@ -416,13 +417,13 @@ class TestHardwareSetupPanelSensorPresets:
 
         self._setup_panel_with_channels(panel)
 
-        preset_combo = panel._table.cellWidget(0, 5)
+        preset_combo = panel._table.cellWidget(0, 6)
         rpm_index = SENSOR_PRESET_NAMES.index("Generic RPM")
         preset_combo.setCurrentIndex(rpm_index)
 
-        slope_spin = panel._table.cellWidget(0, 8)
-        offset_spin = panel._table.cellWidget(0, 9)
-        unit_edit = panel._table.cellWidget(0, 6)
+        slope_spin = panel._table.cellWidget(0, 9)
+        offset_spin = panel._table.cellWidget(0, 10)
+        unit_edit = panel._table.cellWidget(0, 7)
 
         assert isinstance(slope_spin, QDoubleSpinBox)
         assert isinstance(offset_spin, QDoubleSpinBox)
@@ -439,15 +440,15 @@ class TestHardwareSetupPanelSensorPresets:
         self._setup_panel_with_channels(panel)
 
         # Set custom values first
-        slope_spin = panel._table.cellWidget(0, 8)
-        offset_spin = panel._table.cellWidget(0, 9)
-        unit_edit = panel._table.cellWidget(0, 6)
+        slope_spin = panel._table.cellWidget(0, 9)
+        offset_spin = panel._table.cellWidget(0, 10)
+        unit_edit = panel._table.cellWidget(0, 7)
         slope_spin.setValue(42.0)
         offset_spin.setValue(-7.0)
         unit_edit.setText("custom_unit")
 
         # Select (custom) preset
-        preset_combo = panel._table.cellWidget(0, 5)
+        preset_combo = panel._table.cellWidget(0, 6)
         preset_combo.setCurrentIndex(0)  # (custom)
 
         # Values should remain unchanged
@@ -462,13 +463,13 @@ class TestHardwareSetupPanelSensorPresets:
 
         self._setup_panel_with_channels(panel)
 
-        preset_combo = panel._table.cellWidget(0, 5)
+        preset_combo = panel._table.cellWidget(0, 6)
         lc2_index = SENSOR_PRESET_NAMES.index("Innovate LC-2 λ")
         preset_combo.setCurrentIndex(lc2_index)
 
-        slope_spin = panel._table.cellWidget(0, 8)
-        offset_spin = panel._table.cellWidget(0, 9)
-        unit_edit = panel._table.cellWidget(0, 6)
+        slope_spin = panel._table.cellWidget(0, 9)
+        offset_spin = panel._table.cellWidget(0, 10)
+        unit_edit = panel._table.cellWidget(0, 7)
 
         assert abs(slope_spin.value() - 0.2) < 0.001
         assert abs(offset_spin.value() - 0.5) < 0.001
@@ -562,13 +563,13 @@ class TestHardwareSetupPanelSave:
         combo = panel._table.cellWidget(0, 4)
         combo.setCurrentIndex(MEASUREMENT_TYPES.index("RPM"))
 
-        unit_edit = panel._table.cellWidget(0, 6)
+        unit_edit = panel._table.cellWidget(0, 7)
         unit_edit.setText("rpm")
 
-        slope_spin = panel._table.cellWidget(0, 8)
+        slope_spin = panel._table.cellWidget(0, 9)
         slope_spin.setValue(1000.0)
 
-        offset_spin = panel._table.cellWidget(0, 9)
+        offset_spin = panel._table.cellWidget(0, 10)
         offset_spin.setValue(0.0)
 
         panel._on_save_clicked()

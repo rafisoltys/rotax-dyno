@@ -7,9 +7,9 @@ The DashboardWindow provides:
 - Tabbed navigation between Engine Overlay, Strip Charts, Alarms, Runs,
   and Post-Processing views
 - Minimum touch target size of 12mm × 12mm (~45×45 px at 96 DPI)
+- Status bar with ALARM, Cloud, MCC, Log, and CPU Temp indicators
 - Recording indicator (red "REC" label) when a run is active
 - Elapsed run time display (HH:MM:SS) updated every second via QTimer
-- Connection status for remote monitoring
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from typing import Optional
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QHBoxLayout,
     QLabel,
     QMainWindow,
     QStatusBar,
@@ -46,9 +45,12 @@ class DashboardWindow(QMainWindow):
     - Post-Processing: filtering and derived channels
 
     The status bar displays:
-    - Recording indicator (red "REC" label) when a run is active
-    - Elapsed run time in HH:MM:SS format, updated every second
-    - Connection status for remote monitoring clients
+    - ALARM indicator (red when active, green when OK)
+    - Cloud status (connected/disconnected/uploading)
+    - MCC boards count
+    - Log status (recording/idle)
+    - CPU temperature
+    - Recording indicator and elapsed time (backward compat)
     """
 
     def __init__(
@@ -135,12 +137,39 @@ class DashboardWindow(QMainWindow):
         return widget
 
     def _setup_status_bar(self) -> None:
-        """Set up the status bar with recording indicator, elapsed time, and connection status."""
+        """Set up the status bar with ALARM, Cloud, MCC, Log, and CPU Temp indicators."""
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
 
+        # ALARM indicator
+        self._alarm_status = QLabel("ALARM: OK")
+        self._alarm_status.setStyleSheet("QLabel { color: green; font-weight: bold; padding: 4px 8px; }")
+        status_bar.addWidget(self._alarm_status)
+
+        # Cloud status
+        self._cloud_status = QLabel("Cloud: --")
+        self._cloud_status.setStyleSheet("QLabel { padding: 4px 8px; }")
+        status_bar.addWidget(self._cloud_status)
+
+        # MCC boards
+        self._mcc_status = QLabel("MCC: 0 boards")
+        self._mcc_status.setStyleSheet("QLabel { padding: 4px 8px; }")
+        status_bar.addWidget(self._mcc_status)
+
+        # Log status
+        self._log_status = QLabel("Log: Idle")
+        self._log_status.setStyleSheet("QLabel { padding: 4px 8px; }")
+        status_bar.addWidget(self._log_status)
+
+        # CPU Temperature
+        self._temp_status = QLabel("CPU: --\u00b0C")
+        self._temp_status.setStyleSheet("QLabel { padding: 4px 8px; }")
+        status_bar.addPermanentWidget(self._temp_status)
+
+        # --- Backward-compatible widgets (kept for existing tests) ---
+
         # Recording indicator (red "REC" label, hidden by default)
-        self._rec_indicator = QLabel("● REC")
+        self._rec_indicator = QLabel("\u25cf REC")
         self._rec_indicator.setStyleSheet(
             "QLabel { color: red; font-weight: bold; padding: 4px 8px; }"
         )
@@ -157,23 +186,89 @@ class DashboardWindow(QMainWindow):
         self._elapsed_label.setVisible(False)
         status_bar.addWidget(self._elapsed_label)
 
-        # Connection status for remote monitoring
+        # Connection status (kept for backward compatibility with tests)
         self._connection_label = QLabel("Remote: Disconnected")
         self._connection_label.setStyleSheet("QLabel { padding: 4px 8px; }")
         self._connection_label.setMinimumSize(MIN_TOUCH_TARGET_PX, MIN_TOUCH_TARGET_PX)
         self._connection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        status_bar.addPermanentWidget(self._connection_label)
+        self._connection_label.setVisible(False)
+        status_bar.addWidget(self._connection_label)
 
     def _setup_timer(self) -> None:
-        """Set up the 1-second timer for updating elapsed run time."""
+        """Set up timers for elapsed run time and CPU temperature."""
+        # 1-second timer for elapsed run time
         self._timer = QTimer(self)
         self._timer.setInterval(1000)  # 1 second
         self._timer.timeout.connect(self._update_elapsed_time)
+
+        # 2-second timer for CPU temperature
+        self._cpu_timer = QTimer(self)
+        self._cpu_timer.setInterval(2000)
+        self._cpu_timer.timeout.connect(self.update_cpu_temp)
+        self._cpu_timer.start()
 
     def _update_elapsed_time(self) -> None:
         """Increment elapsed time and update the display label."""
         self._elapsed_seconds += 1
         self._elapsed_label.setText(self._format_elapsed_time(self._elapsed_seconds))
+
+    # --- New status bar update methods ---
+
+    def update_alarm_status(self, active: bool, source: str = "") -> None:
+        """Update the ALARM indicator in the status bar.
+
+        Args:
+            active: Whether any alarm is currently active.
+            source: The source channel(s) triggering the alarm.
+        """
+        if active:
+            self._alarm_status.setText(f"\u26a0 ALARM: {source}")
+            self._alarm_status.setStyleSheet("QLabel { color: red; font-weight: bold; padding: 4px 8px; }")
+        else:
+            self._alarm_status.setText("ALARM: OK")
+            self._alarm_status.setStyleSheet("QLabel { color: green; font-weight: bold; padding: 4px 8px; }")
+
+    def update_cloud_status(self, status: str) -> None:
+        """Update the Cloud status indicator.
+
+        Args:
+            status: Status text (e.g. "Connected", "Uploading (3)", "Not configured").
+        """
+        self._cloud_status.setText(f"Cloud: {status}")
+
+    def update_mcc_status(self, board_count: int) -> None:
+        """Update the MCC boards count indicator.
+
+        Args:
+            board_count: Number of active MCC HAT boards.
+        """
+        self._mcc_status.setText(f"MCC: {board_count} board{'s' if board_count != 1 else ''}")
+
+    def update_log_status(self, recording: bool, filename: str = "") -> None:
+        """Update the Log status indicator.
+
+        Args:
+            recording: Whether data is currently being recorded.
+            filename: Optional filename being recorded to.
+        """
+        if recording:
+            self._log_status.setText(f"Log: REC {filename}")
+            self._log_status.setStyleSheet("QLabel { color: red; font-weight: bold; padding: 4px 8px; }")
+        else:
+            self._log_status.setText("Log: Idle")
+            self._log_status.setStyleSheet("QLabel { padding: 4px 8px; }")
+
+    def update_cpu_temp(self) -> None:
+        """Read and display CPU temperature (Linux thermal zone or N/A on Windows)."""
+        try:
+            with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                temp_mc = int(f.read().strip())
+                temp_c = temp_mc / 1000.0
+                self._temp_status.setText(f"CPU: {temp_c:.1f}\u00b0C")
+        except (FileNotFoundError, ValueError, OSError):
+            self._temp_status.setText("CPU: N/A")
+
+    # --- Recording methods (backward compatible) ---
 
     def start_recording(self) -> None:
         """Start the recording indicator and elapsed time counter.
@@ -185,6 +280,7 @@ class DashboardWindow(QMainWindow):
         self._elapsed_label.setText("00:00:00")
         self._rec_indicator.setVisible(True)
         self._elapsed_label.setVisible(True)
+        self.update_log_status(recording=True)
         self._timer.start()
 
     def stop_recording(self) -> None:
@@ -196,6 +292,7 @@ class DashboardWindow(QMainWindow):
         self._timer.stop()
         self._rec_indicator.setVisible(False)
         self._elapsed_label.setVisible(False)
+        self.update_log_status(recording=False)
 
     @property
     def is_recording(self) -> bool:
@@ -209,6 +306,8 @@ class DashboardWindow(QMainWindow):
 
     def set_connection_status(self, connected: bool, client_count: int = 0) -> None:
         """Update the remote monitoring connection status display.
+
+        Kept for backward compatibility with existing tests.
 
         Args:
             connected: Whether the remote monitoring server is active.
