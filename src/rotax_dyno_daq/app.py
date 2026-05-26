@@ -223,9 +223,69 @@ def main() -> int:
     from PyQt6.QtWidgets import QApplication
 
     from rotax_dyno_daq.dashboard.main_window import DashboardWindow
+    from rotax_dyno_daq.dashboard.engine_overlay import EngineOverlayWidget
+    from rotax_dyno_daq.dashboard.strip_chart import StripChartPanel
+    from rotax_dyno_daq.dashboard.alarm_widget import AlarmIndicatorWidget
+    from rotax_dyno_daq.dashboard.alarm_config_panel import AlarmConfigPanel
+    from rotax_dyno_daq.dashboard.run_panel import RunPanel
+    from rotax_dyno_daq.dashboard.post_processing_panel import PostProcessingPanel
 
     qt_app = QApplication(sys.argv)
     dashboard = DashboardWindow(data_bus=data_bus, alarm_manager=alarm_manager)
+
+    # --- Replace placeholder tabs with real widgets ---
+    tab_widget = dashboard.tab_widget
+
+    # Tab 0: Engine Overlay
+    engine_overlay = EngineOverlayWidget(
+        data_bus=data_bus,
+        alarm_manager=alarm_manager,
+    )
+    tab_widget.removeTab(0)
+    tab_widget.insertTab(0, engine_overlay, "Engine Overlay")
+
+    # Tab 1: Strip Charts
+    strip_chart_panel = StripChartPanel(
+        data_bus=data_bus,
+        time_window_seconds=system_config.dashboard_time_window_seconds,
+    )
+    # Add a chart for each configured channel
+    for ch in system_config.channels:
+        if ch.enabled:
+            strip_chart_panel.add_channel(
+                ch.channel_id, ch.calibration.unit_label, ch.display_name or ch.channel_id
+            )
+    tab_widget.removeTab(1)
+    tab_widget.insertTab(1, strip_chart_panel, "Strip Charts")
+
+    # Tab 2: Alarms (combined: indicator + config)
+    from PyQt6.QtWidgets import QVBoxLayout, QWidget, QSplitter
+    from PyQt6.QtCore import Qt as QtConst
+
+    alarms_container = QSplitter(QtConst.Orientation.Vertical)
+    alarm_indicator = AlarmIndicatorWidget(alarm_manager=alarm_manager)
+    channel_ids = [ch.channel_id for ch in system_config.channels]
+    alarm_config = AlarmConfigPanel(
+        alarm_manager=alarm_manager,
+        channel_ids=channel_ids,
+    )
+    alarms_container.addWidget(alarm_indicator)
+    alarms_container.addWidget(alarm_config)
+    tab_widget.removeTab(2)
+    tab_widget.insertTab(2, alarms_container, "Alarms")
+
+    # Tab 3: Runs
+    run_panel = RunPanel(run_manager=run_manager)
+    tab_widget.removeTab(3)
+    tab_widget.insertTab(3, run_panel, "Runs")
+
+    # Tab 4: Post-Processing
+    post_processing_panel = PostProcessingPanel()
+    tab_widget.removeTab(4)
+    tab_widget.insertTab(4, post_processing_panel, "Post-Processing")
+
+    # Select first tab
+    tab_widget.setCurrentIndex(0)
 
     # Show notification if config had issues
     if config_manager.load_error:

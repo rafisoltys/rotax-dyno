@@ -1,0 +1,22 @@
+# Rotax Dyno DAQ - System Configuration
+# Copy this file to ~/.rotax_dyno_daq/config.toml
+
+[system]
+csv_directory = "/home/pi/dyno_data"
+web_server_port = 8080
+max_remote_connections = 3
+dashboard_time_window_seconds = 60
+disk_space_warning_mb = 50
+
+# iDrive e2 Cloud Storage (S3-compatible)
+# Create a bucket named "rotax-dyno-data" in your iDrive e2 panel first
+[cloud]
+endpoint_url = "https://s3.eu-central-1.idrivee2.com"
+bucket_name = "rotax-dyno-data"
+access_key = "PmUHtkVTgdOramd1OVVo"
+secret_key = "kiNodHnjXuWOecYtMO1hFTplBtM7Jna4zMfpXiBo"
+destination_prefix = "runs/"
+upload_timeout_seconds = 300
+max_retries = 10
+retry_interval_seconds = 60
+max_queue_size = 100
