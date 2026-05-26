@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
@@ -377,6 +378,32 @@ class HardwareSetupPanel(QWidget):
         header_layout.addWidget(self._scan_btn)
 
         layout.addLayout(header_layout)
+
+        # CSV Directory chooser
+        csv_dir_layout = QHBoxLayout()
+        csv_dir_label = QLabel("CSV Directory:")
+        csv_dir_label.setMinimumHeight(MIN_TOUCH_TARGET_PX)
+        csv_dir_layout.addWidget(csv_dir_label)
+
+        self._csv_dir_edit = QLineEdit()
+        self._csv_dir_edit.setMinimumHeight(MIN_TOUCH_TARGET_PX)
+        self._csv_dir_edit.setPlaceholderText("Path to CSV log directory")
+        self._csv_dir_edit.setReadOnly(True)
+        # Pre-fill from config if available
+        if self._config_manager is not None:
+            self._csv_dir_edit.setText(
+                str(self._config_manager.config.csv_directory)
+            )
+        csv_dir_layout.addWidget(self._csv_dir_edit, stretch=1)
+
+        self._csv_dir_browse_btn = QPushButton("Browse…")
+        self._csv_dir_browse_btn.setMinimumSize(
+            MIN_TOUCH_TARGET_PX * 2, MIN_TOUCH_TARGET_PX
+        )
+        self._csv_dir_browse_btn.clicked.connect(self._on_csv_dir_browse)
+        csv_dir_layout.addWidget(self._csv_dir_browse_btn)
+
+        layout.addLayout(csv_dir_layout)
 
         # Status label
         self._status_label = QLabel("")
@@ -807,6 +834,14 @@ class HardwareSetupPanel(QWidget):
         # Update config and save
         try:
             self._config_manager.config.channels = channels
+
+            # Update CSV directory if changed
+            csv_dir_text = self._csv_dir_edit.text().strip()
+            if csv_dir_text:
+                from pathlib import Path as _Path
+
+                self._config_manager.config.csv_directory = _Path(csv_dir_text)
+
             self._config_manager.save()
             self._status_label.setText(
                 f"Configuration saved — {len(channels)} channel(s) configured."
@@ -834,6 +869,18 @@ class HardwareSetupPanel(QWidget):
                     "Restart Warning",
                     f"Configuration saved but reader restart failed:\n{e}",
                 )
+
+    def _on_csv_dir_browse(self) -> None:
+        """Open a directory chooser for the CSV log directory."""
+        current_dir = self._csv_dir_edit.text() or ""
+        chosen_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select CSV Log Directory",
+            current_dir,
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if chosen_dir:
+            self._csv_dir_edit.setText(chosen_dir)
 
     def _close_hat_instances(self) -> None:
         """Close any open HAT instances."""

@@ -11,6 +11,7 @@ Implements Requirements 13.1, 13.2, 13.5 for the dashboard UI:
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QDate
@@ -20,6 +21,7 @@ from PyQt6.QtWidgets import (
     QDateEdit,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -35,6 +37,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from rotax_dyno_daq.config.manager import ConfigurationManager
+from rotax_dyno_daq.storage.csv_logger import CsvLogger
 from rotax_dyno_daq.storage.run_manager import RunFilters, RunManager
 
 # Minimum touch target size in pixels (12mm × 12mm at 96 DPI ≈ 45×45 px)
@@ -177,16 +181,22 @@ class RunPanel(QWidget):
     def __init__(
         self,
         run_manager: RunManager,
+        csv_logger: Optional[CsvLogger] = None,
+        config_manager: Optional[ConfigurationManager] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         """Initialize the run management panel.
 
         Args:
             run_manager: The RunManager instance for run lifecycle operations.
+            csv_logger: Optional CsvLogger instance for updating CSV directory.
+            config_manager: Optional ConfigurationManager for persisting changes.
             parent: Optional parent widget.
         """
         super().__init__(parent)
         self._run_manager = run_manager
+        self._csv_logger = csv_logger
+        self._config_manager = config_manager
         self._setup_ui()
         self._refresh_run_log()
 
@@ -194,6 +204,26 @@ class RunPanel(QWidget):
         """Set up the panel layout."""
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
+
+        # --- CSV Directory Section ---
+        csv_dir_group = QGroupBox("CSV Log Directory")
+        csv_dir_layout = QHBoxLayout(csv_dir_group)
+
+        self._csv_dir_edit = QLineEdit()
+        self._csv_dir_edit.setReadOnly(True)
+        self._csv_dir_edit.setMinimumHeight(MIN_TOUCH_TARGET_PX)
+        self._csv_dir_edit.setPlaceholderText("Select directory for CSV logs...")
+        # Show current directory if csv_logger is available
+        if self._csv_logger is not None:
+            self._csv_dir_edit.setText(str(self._csv_logger._csv_directory))
+        csv_dir_layout.addWidget(self._csv_dir_edit)
+
+        self._csv_dir_browse_btn = QPushButton("Browse...")
+        self._csv_dir_browse_btn.setMinimumSize(MIN_TOUCH_TARGET_PX, MIN_TOUCH_TARGET_PX)
+        self._csv_dir_browse_btn.clicked.connect(self._on_browse_csv_dir)
+        csv_dir_layout.addWidget(self._csv_dir_browse_btn)
+
+        layout.addWidget(csv_dir_group)
 
         # --- Run Controls Section ---
         controls_group = QGroupBox("Run Controls")
@@ -337,6 +367,25 @@ class RunPanel(QWidget):
             QMessageBox.critical(
                 self, "Error Stopping Run", str(e)
             )
+
+    def _on_browse_csv_dir(self) -> None:
+        """Handle Browse button click - open directory chooser for CSV logs."""
+        current_dir = self._csv_dir_edit.text() or ""
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select CSV Log Directory", current_dir
+        )
+        if directory:
+            new_path = Path(directory)
+            self._csv_dir_edit.setText(directory)
+            # Update the csv_logger directory if available
+            if self._csv_logger is not None:
+                self._csv_logger._csv_directory = new_path
+            # Persist the change via config_manager
+            if self._config_manager is not None:
+                try:
+                    self._config_manager.set("csv_directory", str(new_path))
+                except Exception:
+                    pass  # Non-critical — directory is already updated in memory
 
     def _on_filter_changed(self) -> None:
         """Handle filter input changes - refresh the run log with filters."""

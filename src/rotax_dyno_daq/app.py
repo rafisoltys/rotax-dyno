@@ -31,8 +31,14 @@ from rotax_dyno_daq.alarms.manager import AlarmManager
 from rotax_dyno_daq.calibration.engine import CalibrationEngine
 from rotax_dyno_daq.config.manager import ConfigurationManager
 from rotax_dyno_daq.core.data_bus import DataBus
-from rotax_dyno_daq.core.enums import ChannelType
-from rotax_dyno_daq.core.models import ChannelConfig, CloudConfig, SystemConfig
+from rotax_dyno_daq.core.enums import ChannelType, SampleValidity
+from rotax_dyno_daq.core.models import (
+    ChannelConfig,
+    CloudConfig,
+    RawSample,
+    CalibratedSample,
+    SystemConfig,
+)
 from rotax_dyno_daq.storage.cloud_uploader import CloudUploader
 from rotax_dyno_daq.storage.csv_logger import CsvLogger
 from rotax_dyno_daq.storage.run_manager import RunManager
@@ -283,7 +289,11 @@ def main() -> int:
     tab_widget.insertTab(2, alarms_container, "Alarms")
 
     # Tab 3: Runs
-    run_panel = RunPanel(run_manager=run_manager)
+    run_panel = RunPanel(
+        run_manager=run_manager,
+        csv_logger=csv_logger,
+        config_manager=config_manager,
+    )
     tab_widget.removeTab(3)
     tab_widget.insertTab(3, run_panel, "Runs")
 
@@ -387,24 +397,70 @@ def main() -> int:
             f"Config: {config_manager.load_error} — using defaults", 10000
         )
 
+    # --- Smoothing control in status bar ---
+    from PyQt6.QtWidgets import QLabel, QSpinBox
+
+    smoothing_label = QLabel("Smoothing:")
+    smoothing_label.setStyleSheet("QLabel { padding: 4px; }")
+    dashboard.statusBar().addPermanentWidget(smoothing_label)
+
+    smoothing_spinbox = QSpinBox()
+    smoothing_spinbox.setRange(1, 50)
+    smoothing_spinbox.setValue(display_smoother.window_size)
+    smoothing_spinbox.setToolTip(
+        "Moving average window size for live display (1 = no smoothing)"
+    )
+    smoothing_spinbox.valueChanged.connect(
+        lambda val: setattr(display_smoother, "window_size", val)
+    )
+    dashboard.statusBar().addPermanentWidget(smoothing_spinbox)
+
     dashboard.show()
 
-    # --- 12. Start HAT readers ---
-    for reader in hat_readers:
-        reader.start()
-    logger.info("Started %d HAT reader(s).", len(hat_readers))
+    # --- 12. Wire DataBus subscriptions (BEFORE starting readers) ---
 
-    # --- 13. Wire DataBus subscriptions ---
+    # Calibration bridge: converts RawSample → CalibratedSample with display smoothing
+    def _calibration_bridge(sample: object) -> None:
+        """Convert RawSample to CalibratedSample via CalibrationEngine and republish."""
+        if not isinstance(sample, RawSample):
+            return  # Already calibrated or not a sample — skip
+
+        calibrated = calibration_engine.apply(
+            sample.channel_id, sample.raw_value, sample.timestamp_ms
+        )
+
+        # Apply display smoothing for valid samples
+        if calibrated.validity == SampleValidity.VALID:
+            smoothed_value = display_smoother.smooth(
+                calibrated.channel_id, calibrated.calibrated_value
+            )
+            calibrated = CalibratedSample(
+                channel_id=calibrated.channel_id,
+                timestamp_ms=calibrated.timestamp_ms,
+                raw_value=calibrated.raw_value,
+                calibrated_value=smoothed_value,
+                unit=calibrated.unit,
+                validity=calibrated.validity,
+            )
+
+        # Publish the calibrated sample on the same channel topic
+        data_bus.publish(sample.channel_id, calibrated)
+
+    data_bus.subscribe("*", _calibration_bridge)
+
     # CsvLogger subscription (writes samples when a run is active)
     def _on_sample_for_csv(sample: object) -> None:
         """Forward calibrated samples to the CSV logger when a run is active."""
         if csv_logger.is_active and hasattr(sample, "calibrated_value"):
-            from rotax_dyno_daq.core.models import CalibratedSample
-
             if isinstance(sample, CalibratedSample):
                 csv_logger.write_sample(sample)
 
     data_bus.subscribe("*", _on_sample_for_csv)
+
+    # --- 13. Start HAT readers ---
+    for reader in hat_readers:
+        reader.start()
+    logger.info("Started %d HAT reader(s).", len(hat_readers))
 
     # --- 14. Run Qt event loop ---
     logger.info("Rotax Dyno DAQ system ready.")
