@@ -122,7 +122,14 @@ def main() -> int:
     logger.info("Starting Rotax Dyno DAQ system...")
 
     # --- 1. Configuration ---
-    config_manager = ConfigurationManager()
+    # Prefer a local config.toml in the working directory if it exists;
+    # otherwise fall back to the default ~/.rotax_dyno_daq/config.toml.
+    local_config_path = Path.cwd() / "config.toml"
+    if local_config_path.exists():
+        config_manager = ConfigurationManager(config_path=local_config_path)
+        logger.info("Using local config file: %s", local_config_path)
+    else:
+        config_manager = ConfigurationManager()
     system_config: SystemConfig = config_manager.load()
 
     if config_manager.load_error:

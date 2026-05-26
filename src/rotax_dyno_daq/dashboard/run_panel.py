@@ -53,6 +53,8 @@ class RunStartDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Start New Run")
         self.setMinimumWidth(400)
+        # Generate default run name from current timestamp
+        self._default_name = datetime.now().strftime("log_%Y%m%d_%H%M%S")
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -67,6 +69,7 @@ class RunStartDialog(QDialog):
 
         self._name_input = QLineEdit()
         self._name_input.setMaxLength(100)
+        self._name_input.setText(self._default_name)
         self._name_input.setPlaceholderText("Enter run name...")
         self._name_input.setMinimumHeight(MIN_TOUCH_TARGET_PX)
         layout.addWidget(self._name_input)

@@ -14,7 +14,10 @@ from typing import Any, Callable, Optional
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
+    QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -135,6 +138,7 @@ class SensorPreset:
 
 SENSOR_PRESETS: list[SensorPreset] = [
     SensorPreset(name="(custom)", slope=1.0, offset=0.0, unit="V"),
+    SensorPreset(name="Custom Range...", slope=1.0, offset=0.0, unit="V"),
     SensorPreset(name="Bosch 0-10 bar", slope=2.5, offset=-1.25, unit="bar"),
     SensorPreset(name="Generic 0-5 bar", slope=1.25, offset=-0.625, unit="bar"),
     SensorPreset(name="Innovate LC-2 λ", slope=0.2, offset=0.5, unit="λ"),
@@ -175,6 +179,131 @@ def _is_mcc134(hat_id: int) -> bool:
     if hat_id == 0x0143 or hat_id == 323:
         return True
     return False
+
+
+class CustomSensorDialog(QDialog):
+    """Dialog for defining a custom sensor calibration via voltage-to-value mapping.
+
+    The user specifies min/max voltage and min/max value, and the dialog
+    calculates slope and offset automatically:
+        slope = (max_value - min_value) / (max_voltage - min_voltage)
+        offset = min_value - slope * min_voltage
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Custom Sensor Range")
+        self.setMinimumWidth(350)
+        self._slope: float = 1.0
+        self._offset: float = 0.0
+        self._unit: str = "bar"
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        """Set up the dialog layout with voltage/value fields."""
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        form_layout = QFormLayout()
+        form_layout.setSpacing(10)
+
+        # Min Voltage
+        self._min_voltage_spin = QDoubleSpinBox()
+        self._min_voltage_spin.setRange(-100.0, 100.0)
+        self._min_voltage_spin.setDecimals(3)
+        self._min_voltage_spin.setValue(0.0)
+        self._min_voltage_spin.setSuffix(" V")
+        self._min_voltage_spin.setMinimumHeight(MIN_TOUCH_TARGET_PX)
+        form_layout.addRow("Min Voltage:", self._min_voltage_spin)
+
+        # Max Voltage
+        self._max_voltage_spin = QDoubleSpinBox()
+        self._max_voltage_spin.setRange(-100.0, 100.0)
+        self._max_voltage_spin.setDecimals(3)
+        self._max_voltage_spin.setValue(5.0)
+        self._max_voltage_spin.setSuffix(" V")
+        self._max_voltage_spin.setMinimumHeight(MIN_TOUCH_TARGET_PX)
+        form_layout.addRow("Max Voltage:", self._max_voltage_spin)
+
+        # Min Value
+        self._min_value_spin = QDoubleSpinBox()
+        self._min_value_spin.setRange(-99999.0, 99999.0)
+        self._min_value_spin.setDecimals(4)
+        self._min_value_spin.setValue(0.0)
+        self._min_value_spin.setMinimumHeight(MIN_TOUCH_TARGET_PX)
+        form_layout.addRow("Min Value:", self._min_value_spin)
+
+        # Max Value
+        self._max_value_spin = QDoubleSpinBox()
+        self._max_value_spin.setRange(-99999.0, 99999.0)
+        self._max_value_spin.setDecimals(4)
+        self._max_value_spin.setValue(100.0)
+        self._max_value_spin.setMinimumHeight(MIN_TOUCH_TARGET_PX)
+        form_layout.addRow("Max Value:", self._max_value_spin)
+
+        # Unit
+        self._unit_edit = QLineEdit("bar")
+        self._unit_edit.setMinimumHeight(MIN_TOUCH_TARGET_PX)
+        self._unit_edit.setPlaceholderText("e.g. bar, PSI, °C")
+        form_layout.addRow("Unit:", self._unit_edit)
+
+        layout.addLayout(form_layout)
+
+        # Dialog buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self._validate_and_accept)
+        button_box.rejected.connect(self.reject)
+
+        # Ensure buttons meet touch target size
+        for button in button_box.buttons():
+            button.setMinimumSize(MIN_TOUCH_TARGET_PX, MIN_TOUCH_TARGET_PX)
+
+        layout.addWidget(button_box)
+
+    def _validate_and_accept(self) -> None:
+        """Validate inputs, calculate slope/offset, and accept."""
+        min_v = self._min_voltage_spin.value()
+        max_v = self._max_voltage_spin.value()
+        min_val = self._min_value_spin.value()
+        max_val = self._max_value_spin.value()
+
+        if abs(max_v - min_v) < 1e-9:
+            QMessageBox.warning(
+                self,
+                "Validation Error",
+                "Min Voltage and Max Voltage must be different.",
+            )
+            return
+
+        unit = self._unit_edit.text().strip()
+        if not unit:
+            QMessageBox.warning(
+                self, "Validation Error", "Unit must not be empty."
+            )
+            return
+
+        # Calculate slope and offset
+        self._slope = (max_val - min_val) / (max_v - min_v)
+        self._offset = min_val - self._slope * min_v
+        self._unit = unit
+        self.accept()
+
+    @property
+    def slope(self) -> float:
+        """Calculated slope value."""
+        return self._slope
+
+    @property
+    def offset(self) -> float:
+        """Calculated offset value."""
+        return self._offset
+
+    @property
+    def unit(self) -> str:
+        """User-specified unit string."""
+        return self._unit
 
 
 class HardwareSetupPanel(QWidget):
@@ -488,6 +617,31 @@ class HardwareSetupPanel(QWidget):
 
         # Skip auto-fill for "(custom)" — user manages values manually
         if preset.name == "(custom)":
+            return
+
+        # Show custom range dialog for "Custom Range..."
+        if preset.name == "Custom Range...":
+            dialog = CustomSensorDialog(self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                # Fill calculated slope/offset/unit into the row
+                slope_spin = self._table.cellWidget(row, 8)
+                if isinstance(slope_spin, QDoubleSpinBox):
+                    slope_spin.setValue(dialog.slope)
+
+                offset_spin = self._table.cellWidget(row, 9)
+                if isinstance(offset_spin, QDoubleSpinBox):
+                    offset_spin.setValue(dialog.offset)
+
+                unit_edit = self._table.cellWidget(row, 6)
+                if isinstance(unit_edit, QLineEdit):
+                    unit_edit.setText(dialog.unit)
+            else:
+                # User cancelled — revert to "(custom)" preset
+                preset_combo = self._table.cellWidget(row, 5)
+                if isinstance(preset_combo, QComboBox):
+                    preset_combo.blockSignals(True)
+                    preset_combo.setCurrentIndex(0)
+                    preset_combo.blockSignals(False)
             return
 
         # Auto-fill slope

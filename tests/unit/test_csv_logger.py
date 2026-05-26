@@ -89,17 +89,20 @@ class TestCsvLoggerStartRun:
     def test_creates_csv_file_with_correct_name_pattern(
         self, csv_logger: CsvLogger, run_info: RunInfo
     ) -> None:
-        """CSV file should be named YYYYMMDD_HHMMSS_{run_name}.csv."""
+        """CSV file should be named log_YYYYMMDD_HHMMSS.csv."""
         csv_logger.start_run(run_info)
 
         assert csv_logger.csv_path is not None
         filename = csv_logger.csv_path.name
-        # Should contain the sanitized run name
-        assert "Test_Run_1" in filename
+        # Should start with "log_" prefix
+        assert filename.startswith("log_")
         # Should end with .csv
         assert filename.endswith(".csv")
-        # Should start with date pattern (YYYYMMDD_HHMMSS)
-        parts = filename.split("_", 2)
+        # Should follow log_YYYYMMDD_HHMMSS.csv pattern
+        # Strip prefix and suffix: "YYYYMMDD_HHMMSS"
+        stem = filename[len("log_"):-len(".csv")]
+        parts = stem.split("_")
+        assert len(parts) == 2
         assert len(parts[0]) == 8  # YYYYMMDD
         assert len(parts[1]) == 6  # HHMMSS
 
@@ -460,34 +463,39 @@ class TestCsvLoggerSampleFormat:
 
 
 class TestCsvLoggerFilenameHandling:
-    """Tests for filename sanitization."""
+    """Tests for filename format (log_YYYYMMDD_HHMMSS.csv)."""
 
-    def test_sanitizes_special_characters(
+    def test_filename_does_not_contain_run_name(
         self, tmp_csv_dir: Path
     ) -> None:
-        """Special characters in run name should be replaced."""
+        """Filename should use log_ prefix, not the run name."""
         logger_instance = CsvLogger(csv_directory=tmp_csv_dir)
         run_info = RunInfo(name='Test/Run:With"Special<Chars>')
         logger_instance.start_run(run_info)
 
         filename = logger_instance.csv_path.name
-        assert "/" not in filename
-        assert ":" not in filename
-        assert '"' not in filename
-        assert "<" not in filename
-        assert ">" not in filename
+        assert filename.startswith("log_")
+        assert filename.endswith(".csv")
+        # Run name should NOT appear in filename
+        assert "Test" not in filename.replace("log_", "")
 
         logger_instance.stop_run()
 
-    def test_spaces_replaced_with_underscores(
+    def test_run_name_stored_in_header_not_filename(
         self, tmp_csv_dir: Path
     ) -> None:
-        """Spaces in run name should become underscores in filename."""
+        """Run name should be in CSV header metadata, not in the filename."""
         logger_instance = CsvLogger(csv_directory=tmp_csv_dir)
         run_info = RunInfo(name="My Test Run")
         logger_instance.start_run(run_info)
 
         filename = logger_instance.csv_path.name
-        assert "My_Test_Run" in filename
+        # Filename should NOT contain the run name
+        assert "My_Test_Run" not in filename
+        assert filename.startswith("log_")
 
         logger_instance.stop_run()
+
+        # Verify run name is in the file content (header)
+        content = logger_instance.csv_path.read_text(encoding="utf-8")
+        assert "My Test Run" in content

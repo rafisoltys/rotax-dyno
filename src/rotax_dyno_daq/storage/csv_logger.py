@@ -106,11 +106,9 @@ class CsvLogger:
         self._sum_values = {}
         self._using_fallback = False
 
-        # Generate filename: YYYYMMDD_HHMMSS_{run_name}.csv
+        # Generate filename: log_YYYYMMDD_HHMMSS.csv
         timestamp_str = self._start_time.strftime("%Y%m%d_%H%M%S")
-        # Sanitize run name for filesystem
-        safe_name = self._sanitize_filename(run_info.name)
-        filename = f"{timestamp_str}_{safe_name}.csv"
+        filename = f"log_{timestamp_str}.csv"
 
         # Try primary directory first, then fallback
         self._csv_path = self._open_csv_file(filename)
@@ -423,8 +421,7 @@ class CsvLogger:
 
         # Generate new filename in fallback directory
         timestamp_str = self._start_time.strftime("%Y%m%d_%H%M%S")
-        safe_name = self._sanitize_filename(self._run_info.name)
-        filename = f"{timestamp_str}_{safe_name}.csv"
+        filename = f"log_{timestamp_str}.csv"
         fallback_path = self._fallback_csv_directory / filename
 
         try:
