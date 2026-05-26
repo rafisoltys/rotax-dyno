@@ -388,7 +388,7 @@ def main() -> int:
         logger.info("StripChartPanel updated with new channels.")
 
         # 7. Update HAT count in status bar
-        dashboard.set_hat_count(len(hat_readers))
+        dashboard.update_mcc_status(len(hat_readers))
 
     hardware_setup_panel.on_config_applied = _on_hardware_config_applied
 
@@ -411,10 +411,10 @@ def main() -> int:
     # --- Wire new status bar indicators ---
 
     # HAT count
-    dashboard.set_hat_count(len(hat_readers))
+    dashboard.update_mcc_status(len(hat_readers))
 
     # Cloud status
-    dashboard.set_cloud_status(cloud_uploader is not None)
+    dashboard.update_cloud_status("Connected" if cloud_uploader is not None else "Not configured")
 
     dashboard.show()
 
@@ -424,20 +424,28 @@ def main() -> int:
     def _update_status_bar() -> None:
         """Periodically update the status bar indicators."""
         # HAT count
-        dashboard.set_hat_count(len(hat_readers))
+        dashboard.update_mcc_status(len(hat_readers))
 
         # Cloud status
-        dashboard.set_cloud_status(cloud_uploader is not None)
+        if cloud_uploader is not None:
+            pending = cloud_uploader.pending_count
+            if pending > 0:
+                dashboard.update_cloud_status(f"Uploading ({pending})")
+            else:
+                dashboard.update_cloud_status("Connected")
+        else:
+            dashboard.update_cloud_status("Not configured")
 
         # Alarm status
         active_alarms = alarm_manager.get_active_alarms()
         if active_alarms:
-            dashboard.set_alarm_status(active=True, channel=active_alarms[0].channel_id)
+            sources = ", ".join(set(a.channel_id for a in active_alarms[:3]))
+            dashboard.update_alarm_status(active=True, source=sources)
         else:
-            dashboard.set_alarm_status(active=False)
+            dashboard.update_alarm_status(active=False)
 
         # Log status
-        dashboard.set_log_status(csv_logger.is_active)
+        dashboard.update_log_status(csv_logger.is_active)
 
     status_timer = QtTimer()
     status_timer.setInterval(2000)

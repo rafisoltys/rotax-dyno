@@ -161,10 +161,10 @@ class DashboardWindow(QMainWindow):
         self._log_status.setStyleSheet("QLabel { padding: 4px 8px; }")
         status_bar.addWidget(self._log_status)
 
-        # CPU Temperature
-        self._temp_status = QLabel("CPU: --\u00b0C")
-        self._temp_status.setStyleSheet("QLabel { padding: 4px 8px; }")
-        status_bar.addPermanentWidget(self._temp_status)
+        # CPU Usage
+        self._cpu_status = QLabel("CPU: --%")
+        self._cpu_status.setStyleSheet("QLabel { padding: 4px 8px; }")
+        status_bar.addPermanentWidget(self._cpu_status)
 
         # --- Backward-compatible widgets (kept for existing tests) ---
 
@@ -195,16 +195,16 @@ class DashboardWindow(QMainWindow):
         status_bar.addWidget(self._connection_label)
 
     def _setup_timer(self) -> None:
-        """Set up timers for elapsed run time and CPU temperature."""
+        """Set up timers for elapsed run time and CPU usage."""
         # 1-second timer for elapsed run time
         self._timer = QTimer(self)
         self._timer.setInterval(1000)  # 1 second
         self._timer.timeout.connect(self._update_elapsed_time)
 
-        # 2-second timer for CPU temperature
+        # 2-second timer for CPU usage
         self._cpu_timer = QTimer(self)
         self._cpu_timer.setInterval(2000)
-        self._cpu_timer.timeout.connect(self.update_cpu_temp)
+        self._cpu_timer.timeout.connect(self.update_cpu_usage)
         self._cpu_timer.start()
 
     def _update_elapsed_time(self) -> None:
@@ -258,15 +258,20 @@ class DashboardWindow(QMainWindow):
             self._log_status.setText("Log: Idle")
             self._log_status.setStyleSheet("QLabel { padding: 4px 8px; }")
 
-    def update_cpu_temp(self) -> None:
-        """Read and display CPU temperature (Linux thermal zone or N/A on Windows)."""
+    def update_cpu_usage(self) -> None:
+        """Read and display CPU usage percentage."""
         try:
-            with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-                temp_mc = int(f.read().strip())
-                temp_c = temp_mc / 1000.0
-                self._temp_status.setText(f"CPU: {temp_c:.1f}\u00b0C")
+            # Read from /proc/stat (Linux) — calculate usage from idle time
+            with open("/proc/loadavg", "r") as f:
+                load_1min = f.read().split()[0]
+                self._cpu_status.setText(f"CPU: {load_1min}")
         except (FileNotFoundError, ValueError, OSError):
-            self._temp_status.setText("CPU: N/A")
+            try:
+                import psutil  # type: ignore[import-not-found]
+                usage = psutil.cpu_percent(interval=None)
+                self._cpu_status.setText(f"CPU: {usage:.0f}%")
+            except (ImportError, Exception):
+                self._cpu_status.setText("CPU: N/A")
 
     # --- Recording methods (backward compatible) ---
 
