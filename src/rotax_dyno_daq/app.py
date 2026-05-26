@@ -1,0 +1,286 @@
+"""Main application entry point for the Rotax Dyno DAQ system.
+
+Wires all components together:
+- ConfigurationManager (TOML persistence)
+- DataBus (pub/sub event bus)
+- CalibrationEngine (raw → engineering units)
+- AlarmManager (threshold monitoring)
+- RunManager (run lifecycle)
+- CsvLogger (data recording)
+- CloudUploader (S3 upload)
+- ThermocoupleReader / AnalogVoltageReader (HAT acquisition)
+- DashboardWindow (PyQt6 GUI)
+- FastAPI WebSocket server (remote monitoring)
+
+Implements graceful shutdown: stops acquisition, flushes CSV, closes connections.
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+import threading
+from pathlib import Path
+from typing import Optional
+
+import uvicorn
+
+from rotax_dyno_daq.acquisition.analog_voltage_reader import AnalogVoltageReader
+from rotax_dyno_daq.acquisition.hat_reader import ThermocoupleReader
+from rotax_dyno_daq.alarms.manager import AlarmManager
+from rotax_dyno_daq.calibration.engine import CalibrationEngine
+from rotax_dyno_daq.config.manager import ConfigurationManager
+from rotax_dyno_daq.core.data_bus import DataBus
+from rotax_dyno_daq.core.enums import ChannelType
+from rotax_dyno_daq.core.models import ChannelConfig, CloudConfig, SystemConfig
+from rotax_dyno_daq.storage.cloud_uploader import CloudUploader
+from rotax_dyno_daq.storage.csv_logger import CsvLogger
+from rotax_dyno_daq.storage.run_manager import RunManager
+from rotax_dyno_daq.web.server import (
+    app as fastapi_app,
+    configure_data_bus,
+    configure_server,
+    set_alarm_manager,
+    set_run_manager,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _setup_logging() -> None:
+    """Configure logging for the application."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def _group_channels_by_type(
+    channels: list[ChannelConfig],
+) -> tuple[list[ChannelConfig], list[ChannelConfig]]:
+    """Group channels into thermocouple and analog voltage categories.
+
+    Args:
+        channels: All configured channels.
+
+    Returns:
+        A tuple of (thermocouple_channels, analog_voltage_channels).
+    """
+    thermocouple_channels: list[ChannelConfig] = []
+    analog_channels: list[ChannelConfig] = []
+
+    for ch in channels:
+        if not ch.enabled:
+            continue
+        if ch.channel_type == ChannelType.THERMOCOUPLE:
+            thermocouple_channels.append(ch)
+        else:
+            # Pressure, RPM, AFR all use MCC 118
+            analog_channels.append(ch)
+
+    return thermocouple_channels, analog_channels
+
+
+def _start_uvicorn_background(port: int) -> threading.Thread:
+    """Start the FastAPI/uvicorn server in a background daemon thread.
+
+    Args:
+        port: The port to serve on.
+
+    Returns:
+        The background thread running uvicorn.
+    """
+    config = uvicorn.Config(
+        app=fastapi_app,
+        host="0.0.0.0",
+        port=port,
+        log_level="warning",
+    )
+    server = uvicorn.Server(config)
+
+    thread = threading.Thread(
+        target=server.run,
+        name="uvicorn-server",
+        daemon=True,
+    )
+    thread.start()
+    logger.info("FastAPI server started on port %d", port)
+    return thread
+
+
+def main() -> int:
+    """Main application entry point.
+
+    Initializes all subsystems, starts acquisition and GUI, and handles
+    graceful shutdown on exit.
+
+    Returns:
+        Exit code (0 for success).
+    """
+    _setup_logging()
+    logger.info("Starting Rotax Dyno DAQ system...")
+
+    # --- 1. Configuration ---
+    config_manager = ConfigurationManager()
+    system_config: SystemConfig = config_manager.load()
+
+    if config_manager.load_error:
+        logger.warning(
+            "Configuration issue: %s. Using factory defaults.",
+            config_manager.load_error,
+        )
+
+    # --- 2. Data Bus ---
+    data_bus = DataBus()
+
+    # --- 3. Calibration Engine ---
+    calibration_engine = CalibrationEngine()
+
+    # Load calibration profiles from config
+    for channel in system_config.channels:
+        calibration_engine.update_profile(channel.channel_id, channel.calibration)
+
+    # --- 4. Alarm Manager ---
+    alarm_manager = AlarmManager(data_bus=data_bus)
+
+    # Configure alarm thresholds from config
+    for alarm_config in system_config.alarms:
+        alarm_manager.configure_threshold(alarm_config.channel_id, alarm_config)
+
+    # --- 5. Run Manager ---
+    run_log_path = system_config.csv_directory / "run_log.json"
+
+    # --- 6. CSV Logger ---
+    csv_logger = CsvLogger(
+        csv_directory=system_config.csv_directory,
+        fallback_csv_directory=system_config.fallback_csv_directory,
+        disk_space_warning_mb=system_config.disk_space_warning_mb,
+    )
+
+    # --- 7. Cloud Uploader ---
+    cloud_uploader: Optional[CloudUploader] = None
+    if system_config.cloud is not None:
+        cloud_uploader = CloudUploader(config=system_config.cloud)
+        cloud_uploader.start()
+        logger.info("Cloud uploader started.")
+
+    # --- 5 (continued). Run Manager with dependencies ---
+    run_manager = RunManager(
+        run_log_path=run_log_path,
+        csv_logger=csv_logger,
+        cloud_uploader=cloud_uploader,
+    )
+
+    # --- 8. HAT Readers ---
+    thermocouple_channels, analog_channels = _group_channels_by_type(
+        system_config.channels
+    )
+
+    hat_readers: list[ThermocoupleReader | AnalogVoltageReader] = []
+
+    if thermocouple_channels:
+        # Group by HAT address
+        tc_by_address: dict[int, list[ChannelConfig]] = {}
+        for ch in thermocouple_channels:
+            tc_by_address.setdefault(ch.hat_address, []).append(ch)
+
+        for address, channels in tc_by_address.items():
+            reader = ThermocoupleReader(
+                address=address,
+                channels=channels,
+                data_bus=data_bus,
+            )
+            hat_readers.append(reader)
+
+    if analog_channels:
+        # Group by HAT address
+        av_by_address: dict[int, list[ChannelConfig]] = {}
+        for ch in analog_channels:
+            av_by_address.setdefault(ch.hat_address, []).append(ch)
+
+        for address, channels in av_by_address.items():
+            reader = AnalogVoltageReader(
+                address=address,
+                channels=channels,
+                data_bus=data_bus,
+            )
+            hat_readers.append(reader)
+
+    # --- 9. Configure FastAPI Web Server ---
+    set_run_manager(run_manager)
+    configure_data_bus(data_bus)
+    set_alarm_manager(alarm_manager)
+    configure_server(
+        max_connections=system_config.max_remote_connections,
+        port=system_config.web_server_port,
+    )
+
+    # --- 10. Start uvicorn in background thread ---
+    _start_uvicorn_background(port=system_config.web_server_port)
+
+    # --- 11. PyQt6 Application and Dashboard ---
+    from PyQt6.QtWidgets import QApplication
+
+    from rotax_dyno_daq.dashboard.main_window import DashboardWindow
+
+    qt_app = QApplication(sys.argv)
+    dashboard = DashboardWindow(data_bus=data_bus, alarm_manager=alarm_manager)
+
+    # Show notification if config had issues
+    if config_manager.load_error:
+        dashboard.statusBar().showMessage(
+            f"Config: {config_manager.load_error} — using defaults", 10000
+        )
+
+    dashboard.show()
+
+    # --- 12. Start HAT readers ---
+    for reader in hat_readers:
+        reader.start()
+    logger.info("Started %d HAT reader(s).", len(hat_readers))
+
+    # --- 13. Wire DataBus subscriptions ---
+    # CsvLogger subscription (writes samples when a run is active)
+    def _on_sample_for_csv(sample: object) -> None:
+        """Forward calibrated samples to the CSV logger when a run is active."""
+        if csv_logger.is_active and hasattr(sample, "calibrated_value"):
+            from rotax_dyno_daq.core.models import CalibratedSample
+
+            if isinstance(sample, CalibratedSample):
+                csv_logger.write_sample(sample)
+
+    data_bus.subscribe("*", _on_sample_for_csv)
+
+    # --- 14. Run Qt event loop ---
+    logger.info("Rotax Dyno DAQ system ready.")
+    exit_code = qt_app.exec()
+
+    # --- 15. Graceful shutdown ---
+    logger.info("Shutting down Rotax Dyno DAQ system...")
+
+    # Stop HAT readers
+    for reader in hat_readers:
+        reader.stop()
+    logger.info("HAT readers stopped.")
+
+    # Flush CSV logger
+    if csv_logger.is_active:
+        csv_logger.flush()
+        logger.info("CSV logger flushed.")
+
+    # Stop cloud uploader
+    if cloud_uploader is not None:
+        cloud_uploader.stop()
+        logger.info("Cloud uploader stopped.")
+
+    # Shutdown configuration manager (flush pending saves)
+    config_manager.shutdown()
+    logger.info("Configuration manager shut down.")
+
+    logger.info("Rotax Dyno DAQ system shut down cleanly.")
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
