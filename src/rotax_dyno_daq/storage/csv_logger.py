@@ -2,6 +2,9 @@
 
 Handles file creation, buffered writing with periodic flush,
 disk space monitoring, and fallback directory switching on write errors.
+
+CSV format: fixed columns, one row per timestamp (flush cycle).
+Header: Date,Time,RPM,OILT,OILP,CLT,IAT,Charge,EGT1,EGT2,EGT3,EGT4,AFR1,AFR2,AFR3,AFR4
 """
 
 import csv
@@ -19,13 +22,41 @@ from rotax_dyno_daq.core.models import CalibratedSample, RunInfo, RunSummary
 
 logger = logging.getLogger(__name__)
 
+# Fixed CSV column layout
+CSV_COLUMNS = [
+    "Date", "Time", "RPM", "OILT", "OILP", "CLT", "IAT", "Charge",
+    "EGT1", "EGT2", "EGT3", "EGT4", "AFR1", "AFR2", "AFR3", "AFR4",
+]
+CSV_DATA_COLUMNS = CSV_COLUMNS[2:]  # Channel columns (without Date/Time)
+
+# Mapping from common channel_id variants to canonical CSV column names
+_CHANNEL_ID_TO_COLUMN: dict[str, str] = {
+    "RPM": "RPM",
+    "OilTemp": "OILT",
+    "OILT": "OILT",
+    "OilP": "OILP",
+    "OILP": "OILP",
+    "CLT": "CLT",
+    "IAT": "IAT",
+    "Charge": "Charge",
+    "ChargeP": "Charge",
+    "EGT1": "EGT1",
+    "EGT2": "EGT2",
+    "EGT3": "EGT3",
+    "EGT4": "EGT4",
+    "AFR1": "AFR1",
+    "AFR2": "AFR2",
+    "AFR3": "AFR3",
+    "AFR4": "AFR4",
+}
+
 
 class CsvLogger:
     """Manages CSV file creation, writing, and flushing during runs.
 
     Features:
-    - Creates timestamped CSV files with header metadata
-    - Buffers samples and flushes at least once per second
+    - Creates timestamped CSV files with a fixed column header
+    - Accumulates latest channel values and writes one row per flush
     - Monitors disk space and alerts when below threshold
     - Switches to fallback directory on write errors
     """
@@ -56,12 +87,14 @@ class CsvLogger:
         # Run state
         self._file: Optional[io.TextIOWrapper] = None
         self._writer: Optional[csv.writer] = None
-        self._buffer: list[CalibratedSample] = []
-        self._buffer_lock = threading.Lock()
         self._run_info: Optional[RunInfo] = None
         self._start_time: Optional[datetime] = None
         self._csv_path: Optional[Path] = None
         self._active = False
+
+        # Current row accumulator: column_name -> latest calibrated value
+        self._current_row: dict[str, float] = {}
+        self._row_lock = threading.Lock()
 
         # Statistics tracking per channel
         self._sample_counts: dict[str, int] = {}
@@ -85,7 +118,7 @@ class CsvLogger:
         return self._csv_path
 
     def start_run(self, run_info: RunInfo) -> None:
-        """Create a new CSV file and write the header section.
+        """Create a new CSV file and write the header row.
 
         Args:
             run_info: Metadata for the run being started.
@@ -99,7 +132,7 @@ class CsvLogger:
 
         self._run_info = run_info
         self._start_time = datetime.now()
-        self._buffer = []
+        self._current_row = {}
         self._sample_counts = {}
         self._min_values = {}
         self._max_values = {}
@@ -114,11 +147,11 @@ class CsvLogger:
         self._csv_path = self._open_csv_file(filename)
         self._active = True
 
-        # Write header section
-        self._write_header(run_info)
+        # Write header row
+        self._write_header()
 
     def write_sample(self, sample: CalibratedSample) -> None:
-        """Buffer a calibrated sample for writing.
+        """Buffer a calibrated sample's latest value for the current row.
 
         Args:
             sample: The calibrated sample to record.
@@ -129,41 +162,51 @@ class CsvLogger:
         if not self._active:
             raise RuntimeError("No active run. Call start_run() first.")
 
-        with self._buffer_lock:
-            self._buffer.append(sample)
+        # Map channel_id to CSV column name
+        column = _CHANNEL_ID_TO_COLUMN.get(sample.channel_id, sample.channel_id)
+
+        with self._row_lock:
+            self._current_row[column] = sample.calibrated_value
 
         # Update statistics
         self._update_statistics(sample)
 
     def flush(self) -> None:
-        """Flush all buffered samples to disk.
+        """Write one CSV row with the latest values from all channels.
 
-        This should be called at least once per second to limit data loss
-        to ≤ 1 second of samples on abnormal termination.
+        Each flush writes ONE row with the current timestamp and the latest
+        value for each channel column. At 1 Hz flush rate, this produces
+        1 row per second with all channel values.
         """
         if not self._active or self._file is None:
             return
 
-        # Grab buffered samples
-        with self._buffer_lock:
-            samples = self._buffer[:]
-            self._buffer.clear()
+        # Grab current row snapshot
+        with self._row_lock:
+            row_snapshot = dict(self._current_row)
+            # Don't clear — keep latest values for next row
 
-        if not samples:
-            # Still check disk space periodically even with no samples
+        if not row_snapshot:
+            # No data received yet — just check disk space
             self._check_disk_space()
             return
 
-        # Write samples to CSV
+        # Build the row
+        now = datetime.now()
+        row = [
+            now.strftime("%Y-%m-%d"),
+            now.strftime("%H:%M:%S.") + f"{now.microsecond // 1000:03d}",
+        ]
+        for col in CSV_DATA_COLUMNS:
+            value = row_snapshot.get(col, "")
+            if isinstance(value, float):
+                row.append(f"{value:.2f}")
+            else:
+                row.append(str(value) if value != "" else "")
+
+        # Write to CSV
         try:
-            for sample in samples:
-                self._writer.writerow([
-                    f"{sample.timestamp_ms:.3f}",
-                    sample.channel_id,
-                    f"{sample.calibrated_value:.6g}",
-                    sample.unit,
-                    sample.validity.value,
-                ])
+            self._writer.writerow(row)
             self._file.flush()
         except OSError as e:
             error_msg = f"Write error to {self._csv_path}: {e}"
@@ -173,7 +216,7 @@ class CsvLogger:
 
             # Attempt to switch to fallback directory
             if not self._using_fallback and self._fallback_csv_directory:
-                self._switch_to_fallback(samples)
+                self._switch_to_fallback()
             else:
                 logger.error("No fallback directory available or already using fallback.")
 
@@ -181,7 +224,7 @@ class CsvLogger:
         self._check_disk_space()
 
     def stop_run(self) -> RunSummary:
-        """Close the CSV file and append summary metadata.
+        """Flush final row and close the CSV file.
 
         Returns:
             RunSummary with statistics for the completed run.
@@ -192,7 +235,7 @@ class CsvLogger:
         if not self._active:
             raise RuntimeError("No active run to stop.")
 
-        # Flush remaining buffered samples
+        # Flush final row
         self.flush()
 
         end_time = datetime.now()
@@ -204,10 +247,7 @@ class CsvLogger:
             if count > 0:
                 mean_values[channel_id] = self._sum_values[channel_id] / count
 
-        # Write summary metadata as comments at end of file
-        self._write_summary(end_time, duration_seconds, mean_values)
-
-        # Close the file
+        # Close the file (no summary metadata appended — keep CSV clean)
         if self._file:
             self._file.close()
             self._file = None
@@ -234,6 +274,7 @@ class CsvLogger:
         self._active = False
         self._run_info = None
         self._start_time = None
+        self._current_row = {}
 
         return summary
 
@@ -283,67 +324,11 @@ class CsvLogger:
             f"and no fallback directory configured."
         )
 
-    def _write_header(self, run_info: RunInfo) -> None:
-        """Write the CSV header section with run metadata.
-
-        Args:
-            run_info: Run metadata to include in the header.
-        """
+    def _write_header(self) -> None:
+        """Write the fixed CSV column header row."""
         if self._writer is None:
             return
-
-        # Write metadata as comment rows
-        self._writer.writerow(["# Run Name", run_info.name])
-        self._writer.writerow(["# Start Time", self._start_time.isoformat()])
-        self._writer.writerow(["# Operator", run_info.operator])
-        self._writer.writerow(["# Notes", run_info.notes])
-        if run_info.tags:
-            self._writer.writerow(["# Tags", ";".join(run_info.tags)])
-
-        # Write column headers
-        self._writer.writerow([
-            "timestamp_ms",
-            "channel_id",
-            "calibrated_value",
-            "unit",
-            "validity",
-        ])
-        self._file.flush()
-
-    def _write_summary(
-        self,
-        end_time: datetime,
-        duration_seconds: float,
-        mean_values: dict[str, float],
-    ) -> None:
-        """Append summary metadata at the end of the CSV file.
-
-        Args:
-            end_time: When the run ended.
-            duration_seconds: Total run duration in seconds.
-            mean_values: Mean values per channel.
-        """
-        if self._writer is None:
-            return
-
-        self._writer.writerow([])
-        self._writer.writerow(["# --- Run Summary ---"])
-        self._writer.writerow(["# End Time", end_time.isoformat()])
-        self._writer.writerow(["# Duration (s)", f"{duration_seconds:.3f}"])
-
-        for channel_id in sorted(self._sample_counts.keys()):
-            count = self._sample_counts[channel_id]
-            min_val = self._min_values.get(channel_id, "N/A")
-            max_val = self._max_values.get(channel_id, "N/A")
-            mean_val = mean_values.get(channel_id, "N/A")
-            self._writer.writerow([
-                f"# Channel: {channel_id}",
-                f"samples={count}",
-                f"min={min_val}",
-                f"max={max_val}",
-                f"mean={mean_val}",
-            ])
-
+        self._writer.writerow(CSV_COLUMNS)
         self._file.flush()
 
     def _update_statistics(self, sample: CalibratedSample) -> None:
@@ -401,12 +386,8 @@ class CsvLogger:
         except OSError as e:
             logger.warning(f"Could not check disk space: {e}")
 
-    def _switch_to_fallback(self, pending_samples: list[CalibratedSample]) -> None:
-        """Switch to the fallback directory after a write error.
-
-        Args:
-            pending_samples: Samples that failed to write to the primary file.
-        """
+    def _switch_to_fallback(self) -> None:
+        """Switch to the fallback directory after a write error."""
         if not self._fallback_csv_directory:
             return
 
@@ -432,18 +413,7 @@ class CsvLogger:
             self._using_fallback = True
 
             # Re-write header
-            self._write_header(self._run_info)
-
-            # Write the pending samples that failed
-            for sample in pending_samples:
-                self._writer.writerow([
-                    f"{sample.timestamp_ms:.3f}",
-                    sample.channel_id,
-                    f"{sample.calibrated_value:.6g}",
-                    sample.unit,
-                    sample.validity.value,
-                ])
-            self._file.flush()
+            self._write_header()
 
         except OSError as e:
             error_msg = f"Fallback directory also failed: {e}"

@@ -8,7 +8,7 @@ import pytest
 
 from rotax_dyno_daq.core.enums import SampleValidity, UploadStatus
 from rotax_dyno_daq.core.models import CalibratedSample, RunInfo
-from rotax_dyno_daq.storage.csv_logger import CsvLogger
+from rotax_dyno_daq.storage.csv_logger import CSV_COLUMNS, CSV_DATA_COLUMNS, CsvLogger
 
 
 @pytest.fixture
@@ -108,32 +108,18 @@ class TestCsvLoggerStartRun:
 
         csv_logger.stop_run()
 
-    def test_csv_file_contains_header_metadata(
+    def test_csv_file_contains_fixed_column_header(
         self, csv_logger: CsvLogger, run_info: RunInfo
     ) -> None:
-        """Header should contain run name, start time, operator, notes."""
+        """Header should be the fixed CSV_COLUMNS row."""
         csv_logger.start_run(run_info)
         csv_logger.stop_run()
 
-        content = csv_logger.csv_path.read_text(encoding="utf-8")
-        assert "Test Run 1" in content
-        assert "Tester" in content
-        assert "Testing the CSV logger" in content
-        assert "test;unit" in content
+        with open(csv_logger.csv_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            header = next(reader)
 
-    def test_csv_file_contains_column_headers(
-        self, csv_logger: CsvLogger, run_info: RunInfo
-    ) -> None:
-        """CSV should have column headers for data rows."""
-        csv_logger.start_run(run_info)
-        csv_logger.stop_run()
-
-        content = csv_logger.csv_path.read_text(encoding="utf-8")
-        assert "timestamp_ms" in content
-        assert "channel_id" in content
-        assert "calibrated_value" in content
-        assert "unit" in content
-        assert "validity" in content
+        assert header == CSV_COLUMNS
 
     def test_raises_if_run_already_active(
         self, csv_logger: CsvLogger, run_info: RunInfo
@@ -158,7 +144,7 @@ class TestCsvLoggerStartRun:
 class TestCsvLoggerWriteSample:
     """Tests for write_sample functionality."""
 
-    def test_buffers_samples(
+    def test_buffers_samples_until_flush(
         self, csv_logger: CsvLogger, run_info: RunInfo, sample_data: list
     ) -> None:
         """Samples should be buffered until flush is called."""
@@ -172,9 +158,9 @@ class TestCsvLoggerWriteSample:
 
         csv_logger.flush()
 
-        # After flush, samples should be written
+        # After flush, values should be written
         content = csv_logger.csv_path.read_text(encoding="utf-8")
-        assert "650" in content
+        assert "660" in content  # Latest EGT1 value
 
         csv_logger.stop_run()
 
@@ -194,10 +180,10 @@ class TestCsvLoggerWriteSample:
 class TestCsvLoggerFlush:
     """Tests for flush functionality."""
 
-    def test_writes_buffered_samples_to_disk(
+    def test_writes_one_row_per_flush(
         self, csv_logger: CsvLogger, run_info: RunInfo, sample_data: list
     ) -> None:
-        """Flush should write all buffered samples to the CSV file."""
+        """Each flush should write exactly one row with latest channel values."""
         csv_logger.start_run(run_info)
         for sample in sample_data:
             csv_logger.write_sample(sample)
@@ -209,42 +195,89 @@ class TestCsvLoggerFlush:
             reader = csv.reader(f)
             rows = list(reader)
 
-        # Find data rows (after header)
-        data_rows = [
-            r for r in rows
-            if r and not r[0].startswith("#") and r[0] != "timestamp_ms"
-        ]
-        assert len(data_rows) == 4
+        # First row is header, second row is data
+        assert len(rows) == 2  # header + 1 data row
+        data_row = rows[1]
+        # Should have Date, Time, then channel values
+        assert len(data_row) == len(CSV_COLUMNS)
 
         csv_logger.stop_run()
 
-    def test_flush_clears_buffer(
+    def test_row_contains_latest_values(
         self, csv_logger: CsvLogger, run_info: RunInfo
     ) -> None:
-        """After flush, buffer should be empty."""
+        """Flush row should contain the latest value for each channel."""
         csv_logger.start_run(run_info)
-        sample = CalibratedSample(
-            channel_id="EGT1",
-            timestamp_ms=0.0,
-            raw_value=2.5,
-            calibrated_value=650.0,
-            unit="°C",
-        )
-        csv_logger.write_sample(sample)
-        csv_logger.flush()
 
-        # Second flush should not write additional rows
+        # Write two EGT1 samples — only latest should appear
+        csv_logger.write_sample(CalibratedSample(
+            channel_id="EGT1", timestamp_ms=0.0, raw_value=2.5,
+            calibrated_value=650.0, unit="°C", validity=SampleValidity.VALID,
+        ))
+        csv_logger.write_sample(CalibratedSample(
+            channel_id="EGT1", timestamp_ms=100.0, raw_value=2.6,
+            calibrated_value=660.0, unit="°C", validity=SampleValidity.VALID,
+        ))
+
         csv_logger.flush()
 
         with open(csv_logger.csv_path, "r", encoding="utf-8") as f:
             reader = csv.reader(f)
             rows = list(reader)
 
-        data_rows = [
-            r for r in rows
-            if r and not r[0].startswith("#") and r[0] != "timestamp_ms"
-        ]
-        assert len(data_rows) == 1
+        data_row = rows[1]
+        # EGT1 is at index 10 in CSV_COLUMNS (Date, Time, RPM, OILT, OILP, CLT, IAT, Charge, EGT1...)
+        egt1_idx = CSV_COLUMNS.index("EGT1")
+        assert data_row[egt1_idx] == "660.00"  # Latest value
+
+        csv_logger.stop_run()
+
+    def test_keeps_values_between_flushes(
+        self, csv_logger: CsvLogger, run_info: RunInfo
+    ) -> None:
+        """Values should persist between flushes (not cleared)."""
+        csv_logger.start_run(run_info)
+
+        csv_logger.write_sample(CalibratedSample(
+            channel_id="EGT1", timestamp_ms=0.0, raw_value=2.5,
+            calibrated_value=650.0, unit="°C", validity=SampleValidity.VALID,
+        ))
+        csv_logger.flush()
+
+        # Second flush without new EGT1 data — should still have EGT1 value
+        csv_logger.write_sample(CalibratedSample(
+            channel_id="RPM", timestamp_ms=100.0, raw_value=3.0,
+            calibrated_value=4500.0, unit="RPM", validity=SampleValidity.VALID,
+        ))
+        csv_logger.flush()
+
+        with open(csv_logger.csv_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+
+        # Should have header + 2 data rows
+        assert len(rows) == 3
+        second_data_row = rows[2]
+        egt1_idx = CSV_COLUMNS.index("EGT1")
+        rpm_idx = CSV_COLUMNS.index("RPM")
+        assert second_data_row[egt1_idx] == "650.00"  # Persisted from first flush
+        assert second_data_row[rpm_idx] == "4500.00"
+
+        csv_logger.stop_run()
+
+    def test_flush_no_op_when_no_data(
+        self, csv_logger: CsvLogger, run_info: RunInfo
+    ) -> None:
+        """Flush should not write a row if no data has been received."""
+        csv_logger.start_run(run_info)
+        csv_logger.flush()
+
+        with open(csv_logger.csv_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+
+        # Only header row
+        assert len(rows) == 1
 
         csv_logger.stop_run()
 
@@ -280,10 +313,10 @@ class TestCsvLoggerStopRun:
         assert summary.upload_status == UploadStatus.PENDING
         assert summary.csv_path is not None
 
-    def test_appends_summary_metadata_to_file(
+    def test_no_summary_metadata_in_csv(
         self, csv_logger: CsvLogger, run_info: RunInfo, sample_data: list
     ) -> None:
-        """stop_run should append summary metadata at end of CSV."""
+        """stop_run should NOT append summary metadata to the CSV file."""
         csv_logger.start_run(run_info)
         for sample in sample_data:
             csv_logger.write_sample(sample)
@@ -291,10 +324,10 @@ class TestCsvLoggerStopRun:
         summary = csv_logger.stop_run()
 
         content = summary.csv_path.read_text(encoding="utf-8")
-        assert "Run Summary" in content
-        assert "Duration" in content
-        assert "EGT1" in content
-        assert "OilP" in content
+        # No summary comments in the file
+        assert "# --- Run Summary ---" not in content
+        assert "# End Time" not in content
+        assert "# Duration" not in content
 
     def test_flushes_remaining_samples(
         self, csv_logger: CsvLogger, run_info: RunInfo
@@ -405,23 +438,18 @@ class TestCsvLoggerFallback:
             logger_instance.start_run(run_info)
 
 
-class TestCsvLoggerSampleFormat:
-    """Tests for CSV sample row format."""
+class TestCsvLoggerRowFormat:
+    """Tests for the fixed-column CSV row format."""
 
-    def test_sample_row_format(
+    def test_row_has_date_and_time_columns(
         self, csv_logger: CsvLogger, run_info: RunInfo
     ) -> None:
-        """Each row should have: timestamp_ms, channel_id, calibrated_value, unit, validity."""
+        """Each data row should start with Date (YYYY-MM-DD) and Time (HH:MM:SS.mmm)."""
         csv_logger.start_run(run_info)
-        sample = CalibratedSample(
-            channel_id="EGT1",
-            timestamp_ms=1234.567,
-            raw_value=2.5,
-            calibrated_value=650.123,
-            unit="°C",
-            validity=SampleValidity.VALID,
-        )
-        csv_logger.write_sample(sample)
+        csv_logger.write_sample(CalibratedSample(
+            channel_id="EGT1", timestamp_ms=0.0, raw_value=2.5,
+            calibrated_value=650.0, unit="°C", validity=SampleValidity.VALID,
+        ))
         csv_logger.flush()
         csv_logger.stop_run()
 
@@ -429,37 +457,62 @@ class TestCsvLoggerSampleFormat:
             reader = csv.reader(f)
             rows = list(reader)
 
-        data_rows = [
-            r for r in rows
-            if r and not r[0].startswith("#") and r[0] != "timestamp_ms" and r[0] != ""
-        ]
-        assert len(data_rows) == 1
-        row = data_rows[0]
-        assert row[0] == "1234.567"  # timestamp_ms
-        assert row[1] == "EGT1"  # channel_id
-        assert "650.123" in row[2]  # calibrated_value
-        assert row[3] == "°C"  # unit
-        assert row[4] == "valid"  # validity
+        data_row = rows[1]
+        # Date format: YYYY-MM-DD
+        date_parts = data_row[0].split("-")
+        assert len(date_parts) == 3
+        assert len(date_parts[0]) == 4  # Year
+        assert len(date_parts[1]) == 2  # Month
+        assert len(date_parts[2]) == 2  # Day
 
-    def test_invalid_sample_validity_recorded(
+        # Time format: HH:MM:SS.mmm
+        assert ":" in data_row[1]
+        assert "." in data_row[1]
+
+    def test_empty_columns_for_missing_channels(
         self, csv_logger: CsvLogger, run_info: RunInfo
     ) -> None:
-        """Invalid samples should have their validity recorded correctly."""
+        """Channels without data should have empty string in their column."""
         csv_logger.start_run(run_info)
-        sample = CalibratedSample(
-            channel_id="EGT1",
-            timestamp_ms=0.0,
-            raw_value=0.0,
-            calibrated_value=0.0,
-            unit="°C",
-            validity=SampleValidity.INVALID,
-        )
-        csv_logger.write_sample(sample)
+        # Only write EGT1 — all other columns should be empty
+        csv_logger.write_sample(CalibratedSample(
+            channel_id="EGT1", timestamp_ms=0.0, raw_value=2.5,
+            calibrated_value=650.0, unit="°C", validity=SampleValidity.VALID,
+        ))
         csv_logger.flush()
         csv_logger.stop_run()
 
-        content = csv_logger.csv_path.read_text(encoding="utf-8")
-        assert "invalid" in content
+        with open(csv_logger.csv_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+
+        data_row = rows[1]
+        # RPM column should be empty
+        rpm_idx = CSV_COLUMNS.index("RPM")
+        assert data_row[rpm_idx] == ""
+        # EGT1 should have value
+        egt1_idx = CSV_COLUMNS.index("EGT1")
+        assert data_row[egt1_idx] == "650.00"
+
+    def test_channel_id_mapping(
+        self, csv_logger: CsvLogger, run_info: RunInfo
+    ) -> None:
+        """Channel IDs like OilTemp should map to OILT column."""
+        csv_logger.start_run(run_info)
+        csv_logger.write_sample(CalibratedSample(
+            channel_id="OilTemp", timestamp_ms=0.0, raw_value=2.0,
+            calibrated_value=95.2, unit="°C", validity=SampleValidity.VALID,
+        ))
+        csv_logger.flush()
+        csv_logger.stop_run()
+
+        with open(csv_logger.csv_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+
+        data_row = rows[1]
+        oilt_idx = CSV_COLUMNS.index("OILT")
+        assert data_row[oilt_idx] == "95.20"
 
 
 class TestCsvLoggerFilenameHandling:
@@ -480,22 +533,3 @@ class TestCsvLoggerFilenameHandling:
         assert "Test" not in filename.replace("log_", "")
 
         logger_instance.stop_run()
-
-    def test_run_name_stored_in_header_not_filename(
-        self, tmp_csv_dir: Path
-    ) -> None:
-        """Run name should be in CSV header metadata, not in the filename."""
-        logger_instance = CsvLogger(csv_directory=tmp_csv_dir)
-        run_info = RunInfo(name="My Test Run")
-        logger_instance.start_run(run_info)
-
-        filename = logger_instance.csv_path.name
-        # Filename should NOT contain the run name
-        assert "My_Test_Run" not in filename
-        assert filename.startswith("log_")
-
-        logger_instance.stop_run()
-
-        # Verify run name is in the file content (header)
-        content = logger_instance.csv_path.read_text(encoding="utf-8")
-        assert "My Test Run" in content

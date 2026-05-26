@@ -349,6 +349,33 @@ class HardwareSetupPanel(QWidget):
 
         self._setup_ui()
         self._setup_timer()
+        self._init_from_config()
+
+    def _init_from_config(self) -> None:
+        """Show currently configured channels from config (without hardware scan)."""
+        if self._config_manager is None:
+            return
+        channels = self._config_manager.config.channels
+        if not channels:
+            return
+
+        # Populate detected_channels from config (virtual — no live readings)
+        for ch in channels:
+            hat_type = "MCC 134" if ch.channel_type == ChannelType.THERMOCOUPLE else "MCC 118"
+            hat_id = MCC_134_ID if ch.channel_type == ChannelType.THERMOCOUPLE else MCC_118_ID
+            self._detected_channels.append(DetectedChannel(
+                hat_type=hat_type,
+                hat_id=hat_id,
+                address=ch.hat_address,
+                channel=ch.hat_channel,
+                hat_instance=None,  # No live readings until scan
+            ))
+
+        self._populate_table()
+        self._restore_assignments_from_config()
+        self._save_btn.setEnabled(True)
+        self._status_label.setText(f"Loaded {len(channels)} channel(s) from config (click Scan to detect hardware)")
+        self._status_label.setStyleSheet("QLabel { color: #069; padding: 4px; }")
 
     @property
     def on_config_applied(self) -> Optional[Callable[[], None]]:
