@@ -2,12 +2,178 @@
 # Copy this file to ~/.rotax_dyno_daq/config.toml
 
 [system]
-csv_directory = "/home/pi/dyno_data"
+csv_directory = "C:/Users/Rafal/dyno_data"
 web_server_port = 8080
 max_remote_connections = 3
 dashboard_time_window_seconds = 60
 disk_space_warning_mb = 50
 
+# --- MCC 118 Channels (address 0, 8 analog inputs 0-7) ---
+# Adjust channel assignments to match your wiring
+
+[[channels]]
+channel_id = "OilP"
+channel_type = "pressure"
+hat_address = 0
+hat_channel = 0
+sample_rate_hz = 10.0
+display_name = "Oil Pressure"
+enabled = true
+
+[channels.calibration]
+calibration_type = "linear"
+unit_label = "bar"
+min_valid_voltage = 0.5
+max_valid_voltage = 4.5
+[channels.calibration.linear_params]
+slope = 2.5
+offset = -1.25
+
+[[channels]]
+channel_id = "ChargeP"
+channel_type = "pressure"
+hat_address = 0
+hat_channel = 1
+sample_rate_hz = 10.0
+display_name = "Charge Pressure"
+enabled = true
+
+[channels.calibration]
+calibration_type = "linear"
+unit_label = "kPa"
+min_valid_voltage = 0.5
+max_valid_voltage = 4.5
+[channels.calibration.linear_params]
+slope = 50.0
+offset = -25.0
+
+[[channels]]
+channel_id = "RPM"
+channel_type = "rpm"
+hat_address = 0
+hat_channel = 2
+sample_rate_hz = 50.0
+display_name = "Engine RPM"
+enabled = true
+
+[channels.calibration]
+calibration_type = "linear"
+unit_label = "RPM"
+min_valid_voltage = 0.2
+max_valid_voltage = 4.8
+[channels.calibration.linear_params]
+slope = 2000.0
+offset = 0.0
+
+[[channels]]
+channel_id = "AFR1"
+channel_type = "afr"
+hat_address = 0
+hat_channel = 3
+sample_rate_hz = 20.0
+display_name = "AFR Cyl 1"
+enabled = true
+
+[channels.calibration]
+calibration_type = "linear"
+unit_label = "lambda"
+min_valid_voltage = 0.0
+max_valid_voltage = 5.0
+[channels.calibration.linear_params]
+slope = 0.4
+offset = 0.5
+
+[[channels]]
+channel_id = "AFR2"
+channel_type = "afr"
+hat_address = 0
+hat_channel = 4
+sample_rate_hz = 20.0
+display_name = "AFR Cyl 2"
+enabled = true
+
+[channels.calibration]
+calibration_type = "linear"
+unit_label = "lambda"
+min_valid_voltage = 0.0
+max_valid_voltage = 5.0
+[channels.calibration.linear_params]
+slope = 0.4
+offset = 0.5
+
+[[channels]]
+channel_id = "AFR3"
+channel_type = "afr"
+hat_address = 0
+hat_channel = 5
+sample_rate_hz = 20.0
+display_name = "AFR Cyl 3"
+enabled = true
+
+[channels.calibration]
+calibration_type = "linear"
+unit_label = "lambda"
+min_valid_voltage = 0.0
+max_valid_voltage = 5.0
+[channels.calibration.linear_params]
+slope = 0.4
+offset = 0.5
+
+[[channels]]
+channel_id = "AFR4"
+channel_type = "afr"
+hat_address = 0
+hat_channel = 6
+sample_rate_hz = 20.0
+display_name = "AFR Cyl 4"
+enabled = true
+
+[channels.calibration]
+calibration_type = "linear"
+unit_label = "lambda"
+min_valid_voltage = 0.0
+max_valid_voltage = 5.0
+[channels.calibration.linear_params]
+slope = 0.4
+offset = 0.5
+
+[[channels]]
+channel_id = "AUX"
+channel_type = "pressure"
+hat_address = 0
+hat_channel = 7
+sample_rate_hz = 10.0
+display_name = "Aux Input"
+enabled = true
+
+[channels.calibration]
+calibration_type = "linear"
+unit_label = "V"
+min_valid_voltage = 0.0
+max_valid_voltage = 5.0
+[channels.calibration.linear_params]
+slope = 1.0
+offset = 0.0
+
+# --- Alarm Thresholds ---
+
+[[alarms]]
+channel_id = "OilP"
+enabled = true
+[alarms.thresholds]
+low_warning = 1.5
+low_critical = 1.0
+deadband = 0.2
+
+[[alarms]]
+channel_id = "RPM"
+enabled = true
+[alarms.thresholds]
+high_warning = 5800.0
+high_critical = 6000.0
+deadband = 100.0
+
+# --- Cloud Storage ---
 # iDrive e2 Cloud Storage (S3-compatible)
 # Create a bucket named "rotax-dyno-data" in your iDrive e2 panel first
 [cloud]

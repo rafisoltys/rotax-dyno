@@ -229,6 +229,7 @@ def main() -> int:
     from rotax_dyno_daq.dashboard.alarm_config_panel import AlarmConfigPanel
     from rotax_dyno_daq.dashboard.run_panel import RunPanel
     from rotax_dyno_daq.dashboard.post_processing_panel import PostProcessingPanel
+    from rotax_dyno_daq.dashboard.hardware_setup_panel import HardwareSetupPanel
 
     qt_app = QApplication(sys.argv)
     dashboard = DashboardWindow(data_bus=data_bus, alarm_manager=alarm_manager)
@@ -283,6 +284,10 @@ def main() -> int:
     post_processing_panel = PostProcessingPanel()
     tab_widget.removeTab(4)
     tab_widget.insertTab(4, post_processing_panel, "Post-Processing")
+
+    # Tab 5: Hardware Setup
+    hardware_setup_panel = HardwareSetupPanel(config_manager=config_manager)
+    tab_widget.addTab(hardware_setup_panel, "Hardware Setup")
 
     # Select first tab
     tab_widget.setCurrentIndex(0)
