@@ -400,18 +400,22 @@ def main() -> int:
     # --- Smoothing control in status bar ---
     from PyQt6.QtWidgets import QLabel, QSpinBox
 
-    smoothing_label = QLabel("Smoothing:")
+    # EMA smoothing state
+    _ema_state: dict[str, float] = {}
+    _ema_alpha = [0.3]  # Mutable container so lambda can modify
+
+    smoothing_label = QLabel("EMA α:")
     smoothing_label.setStyleSheet("QLabel { padding: 4px; }")
     dashboard.statusBar().addPermanentWidget(smoothing_label)
 
     smoothing_spinbox = QSpinBox()
-    smoothing_spinbox.setRange(1, 50)
-    smoothing_spinbox.setValue(display_smoother.window_size)
+    smoothing_spinbox.setRange(1, 10)
+    smoothing_spinbox.setValue(3)
     smoothing_spinbox.setToolTip(
-        "Moving average window size for live display (1 = no smoothing)"
+        "EMA smoothing factor (1=very smooth, 10=no smoothing)"
     )
     smoothing_spinbox.valueChanged.connect(
-        lambda val: setattr(display_smoother, "window_size", val)
+        lambda val: _ema_alpha.__setitem__(0, val / 10.0)
     )
     dashboard.statusBar().addPermanentWidget(smoothing_spinbox)
 
@@ -419,7 +423,7 @@ def main() -> int:
 
     # --- 12. Wire DataBus subscriptions (BEFORE starting readers) ---
 
-    # Calibration bridge: converts RawSample → CalibratedSample with display smoothing
+    # Calibration bridge: converts RawSample → CalibratedSample with EMA smoothing
     def _calibration_bridge(sample: object) -> None:
         """Convert RawSample to CalibratedSample via CalibrationEngine and republish."""
         if not isinstance(sample, RawSample):
@@ -429,16 +433,21 @@ def main() -> int:
             sample.channel_id, sample.raw_value, sample.timestamp_ms
         )
 
-        # Apply display smoothing for valid samples
+        # Apply EMA smoothing for valid samples
         if calibrated.validity == SampleValidity.VALID:
-            smoothed_value = display_smoother.smooth(
-                calibrated.channel_id, calibrated.calibrated_value
-            )
+            channel_id = calibrated.channel_id
+            alpha = _ema_alpha[0]
+            if channel_id in _ema_state:
+                smoothed = alpha * calibrated.calibrated_value + (1 - alpha) * _ema_state[channel_id]
+            else:
+                smoothed = calibrated.calibrated_value
+            _ema_state[channel_id] = smoothed
+
             calibrated = CalibratedSample(
                 channel_id=calibrated.channel_id,
                 timestamp_ms=calibrated.timestamp_ms,
                 raw_value=calibrated.raw_value,
-                calibrated_value=smoothed_value,
+                calibrated_value=smoothed,
                 unit=calibrated.unit,
                 validity=calibrated.validity,
             )
