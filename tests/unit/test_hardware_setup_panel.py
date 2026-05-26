@@ -85,9 +85,9 @@ class TestHardwareSetupPanelInit:
         assert panel._status_label is not None
 
     def test_panel_has_table(self, panel):
-        """Panel should have a channel table."""
+        """Panel should have a channel table with 11 columns."""
         assert panel._table is not None
-        assert panel._table.columnCount() == 10
+        assert panel._table.columnCount() == 11
 
     def test_table_headers(self, panel):
         """Table should have correct column headers."""
@@ -97,6 +97,7 @@ class TestHardwareSetupPanelInit:
             "Channel",
             "Live Voltage",
             "Assigned To",
+            "Sensor Preset",
             "Unit",
             "Cal Type",
             "Slope",
@@ -114,6 +115,10 @@ class TestHardwareSetupPanelInit:
 
         if not DAQHATS_AVAILABLE:
             assert "daqhats library not available" in panel._status_label.text()
+
+    def test_on_config_applied_callback_initially_none(self, panel):
+        """The on_config_applied callback should be None initially."""
+        assert panel.on_config_applied is None
 
 
 class TestHardwareSetupPanelScan:
@@ -278,13 +283,25 @@ class TestHardwareSetupPanelTable:
         assert combo.count() == len(MEASUREMENT_TYPES)
         assert combo.itemText(0) == "(unassigned)"
 
+    def test_table_has_sensor_preset_dropdown(self, panel):
+        """Each row should have a sensor preset dropdown."""
+        from PyQt6.QtWidgets import QComboBox
+        from rotax_dyno_daq.dashboard.hardware_setup_panel import SENSOR_PRESET_NAMES
+
+        self._setup_panel_with_channels(panel)
+
+        preset_combo = panel._table.cellWidget(0, 5)
+        assert isinstance(preset_combo, QComboBox)
+        assert preset_combo.count() == len(SENSOR_PRESET_NAMES)
+        assert preset_combo.itemText(0) == "(custom)"
+
     def test_table_has_unit_field(self, panel):
         """Each row should have a unit text field."""
         from PyQt6.QtWidgets import QLineEdit
 
         self._setup_panel_with_channels(panel)
 
-        unit_edit = panel._table.cellWidget(0, 5)
+        unit_edit = panel._table.cellWidget(0, 6)
         assert isinstance(unit_edit, QLineEdit)
         assert unit_edit.text() == "V"
 
@@ -294,7 +311,7 @@ class TestHardwareSetupPanelTable:
 
         self._setup_panel_with_channels(panel)
 
-        cal_combo = panel._table.cellWidget(0, 6)
+        cal_combo = panel._table.cellWidget(0, 7)
         assert isinstance(cal_combo, QComboBox)
         assert cal_combo.itemText(0) == "linear"
         assert cal_combo.itemText(1) == "lookup_table"
@@ -305,7 +322,7 @@ class TestHardwareSetupPanelTable:
 
         self._setup_panel_with_channels(panel)
 
-        slope_spin = panel._table.cellWidget(0, 7)
+        slope_spin = panel._table.cellWidget(0, 8)
         assert isinstance(slope_spin, QDoubleSpinBox)
         assert slope_spin.value() == 1.0
 
@@ -315,7 +332,7 @@ class TestHardwareSetupPanelTable:
 
         self._setup_panel_with_channels(panel)
 
-        offset_spin = panel._table.cellWidget(0, 8)
+        offset_spin = panel._table.cellWidget(0, 9)
         assert isinstance(offset_spin, QDoubleSpinBox)
         assert offset_spin.value() == 0.0
 
@@ -329,7 +346,7 @@ class TestHardwareSetupPanelTable:
         combo = panel._table.cellWidget(0, 4)
         combo.setCurrentIndex(1)  # Set to "OilP"
 
-        slope_spin = panel._table.cellWidget(0, 7)
+        slope_spin = panel._table.cellWidget(0, 8)
         slope_spin.setValue(5.0)
 
         # Clear the row
@@ -347,6 +364,115 @@ class TestHardwareSetupPanelTable:
 
         type_item_1 = panel._table.item(1, 0)
         assert type_item_1.text() == "MCC 134"
+
+
+class TestHardwareSetupPanelSensorPresets:
+    """Tests for sensor preset auto-fill functionality."""
+
+    def _setup_panel_with_channels(self, panel):
+        """Helper to set up panel with a mock detected channel."""
+        from rotax_dyno_daq.dashboard.hardware_setup_panel import (
+            DetectedChannel,
+            MCC_118_ID,
+        )
+
+        panel._detected_channels = [
+            DetectedChannel(
+                hat_type="MCC 118",
+                hat_id=MCC_118_ID,
+                address=0,
+                channel=0,
+                hat_instance=None,
+            ),
+        ]
+        panel._populate_table()
+
+    def test_preset_bosch_fills_slope_offset_unit(self, panel):
+        """Selecting Bosch 0-10 bar preset should fill slope=2.5, offset=-1.25, unit=bar."""
+        from PyQt6.QtWidgets import QComboBox, QDoubleSpinBox, QLineEdit
+        from rotax_dyno_daq.dashboard.hardware_setup_panel import SENSOR_PRESET_NAMES
+
+        self._setup_panel_with_channels(panel)
+
+        preset_combo = panel._table.cellWidget(0, 5)
+        bosch_index = SENSOR_PRESET_NAMES.index("Bosch 0-10 bar")
+        preset_combo.setCurrentIndex(bosch_index)
+
+        slope_spin = panel._table.cellWidget(0, 8)
+        offset_spin = panel._table.cellWidget(0, 9)
+        unit_edit = panel._table.cellWidget(0, 6)
+
+        assert isinstance(slope_spin, QDoubleSpinBox)
+        assert isinstance(offset_spin, QDoubleSpinBox)
+        assert isinstance(unit_edit, QLineEdit)
+        assert abs(slope_spin.value() - 2.5) < 0.001
+        assert abs(offset_spin.value() - (-1.25)) < 0.001
+        assert unit_edit.text() == "bar"
+
+    def test_preset_generic_rpm_fills_values(self, panel):
+        """Selecting Generic RPM preset should fill slope=1800, offset=0, unit=RPM."""
+        from PyQt6.QtWidgets import QDoubleSpinBox, QLineEdit
+        from rotax_dyno_daq.dashboard.hardware_setup_panel import SENSOR_PRESET_NAMES
+
+        self._setup_panel_with_channels(panel)
+
+        preset_combo = panel._table.cellWidget(0, 5)
+        rpm_index = SENSOR_PRESET_NAMES.index("Generic RPM")
+        preset_combo.setCurrentIndex(rpm_index)
+
+        slope_spin = panel._table.cellWidget(0, 8)
+        offset_spin = panel._table.cellWidget(0, 9)
+        unit_edit = panel._table.cellWidget(0, 6)
+
+        assert isinstance(slope_spin, QDoubleSpinBox)
+        assert isinstance(offset_spin, QDoubleSpinBox)
+        assert isinstance(unit_edit, QLineEdit)
+        assert abs(slope_spin.value() - 1800.0) < 0.001
+        assert abs(offset_spin.value() - 0.0) < 0.001
+        assert unit_edit.text() == "RPM"
+
+    def test_preset_custom_does_not_overwrite(self, panel):
+        """Selecting (custom) preset should not overwrite existing values."""
+        from PyQt6.QtWidgets import QDoubleSpinBox, QLineEdit
+        from rotax_dyno_daq.dashboard.hardware_setup_panel import SENSOR_PRESET_NAMES
+
+        self._setup_panel_with_channels(panel)
+
+        # Set custom values first
+        slope_spin = panel._table.cellWidget(0, 8)
+        offset_spin = panel._table.cellWidget(0, 9)
+        unit_edit = panel._table.cellWidget(0, 6)
+        slope_spin.setValue(42.0)
+        offset_spin.setValue(-7.0)
+        unit_edit.setText("custom_unit")
+
+        # Select (custom) preset
+        preset_combo = panel._table.cellWidget(0, 5)
+        preset_combo.setCurrentIndex(0)  # (custom)
+
+        # Values should remain unchanged
+        assert abs(slope_spin.value() - 42.0) < 0.001
+        assert abs(offset_spin.value() - (-7.0)) < 0.001
+        assert unit_edit.text() == "custom_unit"
+
+    def test_preset_innovate_lc2_fills_values(self, panel):
+        """Selecting Innovate LC-2 preset should fill slope=0.2, offset=0.5, unit=λ."""
+        from PyQt6.QtWidgets import QDoubleSpinBox, QLineEdit
+        from rotax_dyno_daq.dashboard.hardware_setup_panel import SENSOR_PRESET_NAMES
+
+        self._setup_panel_with_channels(panel)
+
+        preset_combo = panel._table.cellWidget(0, 5)
+        lc2_index = SENSOR_PRESET_NAMES.index("Innovate LC-2 λ")
+        preset_combo.setCurrentIndex(lc2_index)
+
+        slope_spin = panel._table.cellWidget(0, 8)
+        offset_spin = panel._table.cellWidget(0, 9)
+        unit_edit = panel._table.cellWidget(0, 6)
+
+        assert abs(slope_spin.value() - 0.2) < 0.001
+        assert abs(offset_spin.value() - 0.5) < 0.001
+        assert unit_edit.text() == "λ"
 
 
 class TestHardwareSetupPanelSave:
@@ -436,13 +562,13 @@ class TestHardwareSetupPanelSave:
         combo = panel._table.cellWidget(0, 4)
         combo.setCurrentIndex(MEASUREMENT_TYPES.index("RPM"))
 
-        unit_edit = panel._table.cellWidget(0, 5)
+        unit_edit = panel._table.cellWidget(0, 6)
         unit_edit.setText("rpm")
 
-        slope_spin = panel._table.cellWidget(0, 7)
+        slope_spin = panel._table.cellWidget(0, 8)
         slope_spin.setValue(1000.0)
 
-        offset_spin = panel._table.cellWidget(0, 8)
+        offset_spin = panel._table.cellWidget(0, 9)
         offset_spin.setValue(0.0)
 
         panel._on_save_clicked()
@@ -484,6 +610,39 @@ class TestHardwareSetupPanelSave:
         ) as mock_msg:
             panel._on_save_clicked()
             mock_msg.assert_called_once()
+
+    def test_save_invokes_on_config_applied_callback(self, panel_with_config):
+        """Save should invoke the on_config_applied callback after saving."""
+        from rotax_dyno_daq.dashboard.hardware_setup_panel import (
+            DetectedChannel,
+            MEASUREMENT_TYPES,
+            MCC_118_ID,
+        )
+
+        panel, mock_config = panel_with_config
+
+        panel._detected_channels = [
+            DetectedChannel(
+                hat_type="MCC 118",
+                hat_id=MCC_118_ID,
+                address=0,
+                channel=0,
+                hat_instance=None,
+            ),
+        ]
+        panel._populate_table()
+
+        # Assign channel
+        combo = panel._table.cellWidget(0, 4)
+        combo.setCurrentIndex(MEASUREMENT_TYPES.index("OilP"))
+
+        # Set callback
+        callback_mock = MagicMock()
+        panel.on_config_applied = callback_mock
+
+        panel._on_save_clicked()
+
+        callback_mock.assert_called_once()
 
 
 class TestHardwareSetupPanelLiveReadings:
@@ -609,3 +768,35 @@ class TestHardwareSetupPanelTouchTargets:
         panel._populate_table()
 
         assert panel._table.rowHeight(0) >= 45
+
+
+class TestHardwareSetupPanelMCC134Detection:
+    """Tests for MCC 134 detection helper functions."""
+
+    def test_is_mcc118_with_correct_id(self):
+        """_is_mcc118 should return True for the MCC 118 ID."""
+        from rotax_dyno_daq.dashboard.hardware_setup_panel import _is_mcc118
+
+        assert _is_mcc118(0x0142) is True
+        assert _is_mcc118(322) is True
+
+    def test_is_mcc134_with_correct_id(self):
+        """_is_mcc134 should return True for the MCC 134 ID."""
+        from rotax_dyno_daq.dashboard.hardware_setup_panel import _is_mcc134
+
+        assert _is_mcc134(0x0143) is True
+        assert _is_mcc134(323) is True
+
+    def test_is_mcc118_with_wrong_id(self):
+        """_is_mcc118 should return False for non-MCC 118 IDs."""
+        from rotax_dyno_daq.dashboard.hardware_setup_panel import _is_mcc118
+
+        assert _is_mcc118(0x0143) is False
+        assert _is_mcc118(999) is False
+
+    def test_is_mcc134_with_wrong_id(self):
+        """_is_mcc134 should return False for non-MCC 134 IDs."""
+        from rotax_dyno_daq.dashboard.hardware_setup_panel import _is_mcc134
+
+        assert _is_mcc134(0x0142) is False
+        assert _is_mcc134(999) is False

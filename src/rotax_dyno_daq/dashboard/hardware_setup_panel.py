@@ -2,14 +2,14 @@
 
 Provides auto-detection of MCC DAQ HATs, live voltage preview,
 channel-to-measurement assignment, inline calibration configuration,
-and save/apply functionality.
+sensor preset selection, and save/apply functionality.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -61,9 +61,13 @@ try:
 except ImportError:
     pass
 
-# MCC HAT type IDs
-MCC_118_ID = 0x0142
-MCC_134_ID = 0x0143
+# MCC HAT type IDs — use HatIDs enum values when available, fallback to known constants
+if DAQHATS_AVAILABLE and HatIDs is not None:
+    MCC_118_ID = int(HatIDs.MCC_118)
+    MCC_134_ID = int(HatIDs.MCC_134)
+else:
+    MCC_118_ID = 0x0142  # 322
+    MCC_134_ID = 0x0143  # 323
 
 # Number of channels per HAT type
 MCC_118_CHANNELS = 8
@@ -117,6 +121,31 @@ _DEFAULT_SAMPLE_RATES: dict[ChannelType, float] = {
 }
 
 
+# --- Sensor Presets ---
+
+@dataclass
+class SensorPreset:
+    """A sensor preset that auto-fills slope, offset, and unit."""
+
+    name: str
+    slope: float
+    offset: float
+    unit: str
+
+
+SENSOR_PRESETS: list[SensorPreset] = [
+    SensorPreset(name="(custom)", slope=1.0, offset=0.0, unit="V"),
+    SensorPreset(name="Bosch 0-10 bar", slope=2.5, offset=-1.25, unit="bar"),
+    SensorPreset(name="Generic 0-5 bar", slope=1.25, offset=-0.625, unit="bar"),
+    SensorPreset(name="Innovate LC-2 λ", slope=0.2, offset=0.5, unit="λ"),
+    SensorPreset(name="VDO Oil Pressure", slope=2.5, offset=-1.25, unit="bar"),
+    SensorPreset(name="Generic RPM", slope=1800.0, offset=0.0, unit="RPM"),
+    SensorPreset(name="Raw Voltage", slope=1.0, offset=0.0, unit="V"),
+]
+
+SENSOR_PRESET_NAMES = [p.name for p in SENSOR_PRESETS]
+
+
 @dataclass
 class DetectedChannel:
     """A detected HAT channel with its metadata."""
@@ -128,15 +157,37 @@ class DetectedChannel:
     hat_instance: Any = None  # mcc118 or mcc134 instance for live reading
 
 
+def _is_mcc118(hat_id: int) -> bool:
+    """Check if a HAT ID corresponds to an MCC 118 board."""
+    if hat_id == MCC_118_ID:
+        return True
+    # Fallback: check against known constant in case enum differs
+    if hat_id == 0x0142 or hat_id == 322:
+        return True
+    return False
+
+
+def _is_mcc134(hat_id: int) -> bool:
+    """Check if a HAT ID corresponds to an MCC 134 board."""
+    if hat_id == MCC_134_ID:
+        return True
+    # Fallback: check against known constant in case enum differs
+    if hat_id == 0x0143 or hat_id == 323:
+        return True
+    return False
+
+
 class HardwareSetupPanel(QWidget):
     """Hardware discovery and channel binding panel.
 
     Features:
     - "Scan Hardware" button that calls daqhats.hat_list() to find connected HATs
-    - Table showing: HAT Type | Address | Channel | Live Voltage | Assigned To | Unit | Cal Type | Slope | Offset | Action
+    - Table showing: HAT Type | Address | Channel | Live Voltage | Assigned To |
+      Sensor Preset | Unit | Cal Type | Slope | Offset | Action
     - Each row has a live voltage reading updated at 2 Hz
     - "Assigned To" is a QComboBox with measurement types
-    - "Save & Apply" button that writes config and restarts readers
+    - "Sensor Preset" auto-fills slope/offset/unit for common sensors
+    - "Save & Apply" button that writes config and triggers reader restart
     """
 
     def __init__(
@@ -156,8 +207,21 @@ class HardwareSetupPanel(QWidget):
         self._hat_instances: dict[int, Any] = {}  # address -> hat instance
         self._live_reading_active = False
 
+        # Callback invoked after Save & Apply succeeds — app.py sets this
+        self._on_config_applied_callback: Optional[Callable[[], None]] = None
+
         self._setup_ui()
         self._setup_timer()
+
+    @property
+    def on_config_applied(self) -> Optional[Callable[[], None]]:
+        """Callback invoked after configuration is saved and applied."""
+        return self._on_config_applied_callback
+
+    @on_config_applied.setter
+    def on_config_applied(self, callback: Optional[Callable[[], None]]) -> None:
+        """Set the callback invoked after configuration is saved and applied."""
+        self._on_config_applied_callback = callback
 
     def _setup_ui(self) -> None:
         """Build the panel UI layout."""
@@ -198,13 +262,14 @@ class HardwareSetupPanel(QWidget):
 
         # Channel table
         self._table = QTableWidget()
-        self._table.setColumnCount(10)
+        self._table.setColumnCount(11)
         self._table.setHorizontalHeaderLabels([
             "HAT Type",
             "Address",
             "Channel",
             "Live Voltage",
             "Assigned To",
+            "Sensor Preset",
             "Unit",
             "Cal Type",
             "Slope",
@@ -256,7 +321,9 @@ class HardwareSetupPanel(QWidget):
             return
 
         try:
+            # Use filter_by_id=0 to get ALL HATs (no filtering)
             hats = hat_list(filter_by_id=0)
+            logger.info("hat_list(filter_by_id=0) returned %d HAT(s)", len(hats))
         except Exception as e:
             logger.error("Failed to scan for HATs: %s", e)
             self._status_label.setText(f"Scan failed: {e}")
@@ -275,7 +342,15 @@ class HardwareSetupPanel(QWidget):
         for hat_info in hats:
             hat_id = hat_info.id
             address = hat_info.address
-            if hat_id == MCC_118_ID:
+
+            # Log detailed info for debugging detection issues
+            id_string = getattr(hat_info, "product_name", None) or getattr(hat_info, "id_string", "")
+            logger.info(
+                "Detected HAT: id=0x%04X (%d), address=%d, product=%s",
+                hat_id, hat_id, address, id_string,
+            )
+
+            if _is_mcc118(hat_id):
                 hat_type_name = "MCC 118"
                 num_channels = MCC_118_CHANNELS
                 try:
@@ -284,7 +359,7 @@ class HardwareSetupPanel(QWidget):
                 except Exception as e:
                     logger.error("Failed to open MCC 118 at address %d: %s", address, e)
                     continue
-            elif hat_id == MCC_134_ID:
+            elif _is_mcc134(hat_id):
                 hat_type_name = "MCC 134"
                 num_channels = MCC_134_CHANNELS
                 try:
@@ -294,6 +369,10 @@ class HardwareSetupPanel(QWidget):
                     logger.error("Failed to open MCC 134 at address %d: %s", address, e)
                     continue
             else:
+                logger.warning(
+                    "Skipping unknown HAT type: id=0x%04X (%d) at address %d",
+                    hat_id, hat_id, address,
+                )
                 continue  # Skip unknown HAT types
 
             found_parts.append(f"{hat_type_name} at address {address}")
@@ -348,17 +427,26 @@ class HardwareSetupPanel(QWidget):
             combo.setMinimumHeight(MIN_TOUCH_TARGET_PX)
             self._table.setCellWidget(row, 4, combo)
 
+            # Sensor Preset (dropdown) — auto-fills slope/offset/unit
+            preset_combo = QComboBox()
+            preset_combo.addItems(SENSOR_PRESET_NAMES)
+            preset_combo.setMinimumHeight(MIN_TOUCH_TARGET_PX)
+            preset_combo.currentIndexChanged.connect(
+                lambda index, r=row: self._on_preset_changed(r, index)
+            )
+            self._table.setCellWidget(row, 5, preset_combo)
+
             # Unit
             unit_edit = QLineEdit("V")
             unit_edit.setMinimumHeight(MIN_TOUCH_TARGET_PX)
             unit_edit.setPlaceholderText("Unit")
-            self._table.setCellWidget(row, 5, unit_edit)
+            self._table.setCellWidget(row, 6, unit_edit)
 
             # Calibration Type
             cal_combo = QComboBox()
             cal_combo.addItems(["linear", "lookup_table"])
             cal_combo.setMinimumHeight(MIN_TOUCH_TARGET_PX)
-            self._table.setCellWidget(row, 6, cal_combo)
+            self._table.setCellWidget(row, 7, cal_combo)
 
             # Slope
             slope_spin = QDoubleSpinBox()
@@ -366,7 +454,7 @@ class HardwareSetupPanel(QWidget):
             slope_spin.setDecimals(4)
             slope_spin.setValue(1.0)
             slope_spin.setMinimumHeight(MIN_TOUCH_TARGET_PX)
-            self._table.setCellWidget(row, 7, slope_spin)
+            self._table.setCellWidget(row, 8, slope_spin)
 
             # Offset
             offset_spin = QDoubleSpinBox()
@@ -374,17 +462,48 @@ class HardwareSetupPanel(QWidget):
             offset_spin.setDecimals(4)
             offset_spin.setValue(0.0)
             offset_spin.setMinimumHeight(MIN_TOUCH_TARGET_PX)
-            self._table.setCellWidget(row, 8, offset_spin)
+            self._table.setCellWidget(row, 9, offset_spin)
 
             # Action — clear assignment button
             clear_btn = QPushButton("Clear")
             clear_btn.setMinimumSize(MIN_TOUCH_TARGET_PX, MIN_TOUCH_TARGET_PX)
             clear_btn.clicked.connect(lambda checked, r=row: self._clear_row(r))
-            self._table.setCellWidget(row, 9, clear_btn)
+            self._table.setCellWidget(row, 10, clear_btn)
 
         # Set row heights for touch targets
         for row in range(self._table.rowCount()):
             self._table.setRowHeight(row, MIN_TOUCH_TARGET_PX)
+
+    def _on_preset_changed(self, row: int, index: int) -> None:
+        """Handle sensor preset selection — auto-fill slope/offset/unit.
+
+        Args:
+            row: The table row that changed.
+            index: The selected preset index.
+        """
+        if index < 0 or index >= len(SENSOR_PRESETS):
+            return
+
+        preset = SENSOR_PRESETS[index]
+
+        # Skip auto-fill for "(custom)" — user manages values manually
+        if preset.name == "(custom)":
+            return
+
+        # Auto-fill slope
+        slope_spin = self._table.cellWidget(row, 8)
+        if isinstance(slope_spin, QDoubleSpinBox):
+            slope_spin.setValue(preset.slope)
+
+        # Auto-fill offset
+        offset_spin = self._table.cellWidget(row, 9)
+        if isinstance(offset_spin, QDoubleSpinBox):
+            offset_spin.setValue(preset.offset)
+
+        # Auto-fill unit
+        unit_edit = self._table.cellWidget(row, 6)
+        if isinstance(unit_edit, QLineEdit):
+            unit_edit.setText(preset.unit)
 
     def _clear_row(self, row: int) -> None:
         """Reset a row's assignment to unassigned defaults."""
@@ -392,19 +511,23 @@ class HardwareSetupPanel(QWidget):
         if isinstance(combo, QComboBox):
             combo.setCurrentIndex(0)
 
-        unit_edit = self._table.cellWidget(row, 5)
+        preset_combo = self._table.cellWidget(row, 5)
+        if isinstance(preset_combo, QComboBox):
+            preset_combo.setCurrentIndex(0)
+
+        unit_edit = self._table.cellWidget(row, 6)
         if isinstance(unit_edit, QLineEdit):
             unit_edit.setText("V")
 
-        cal_combo = self._table.cellWidget(row, 6)
+        cal_combo = self._table.cellWidget(row, 7)
         if isinstance(cal_combo, QComboBox):
             cal_combo.setCurrentIndex(0)
 
-        slope_spin = self._table.cellWidget(row, 7)
+        slope_spin = self._table.cellWidget(row, 8)
         if isinstance(slope_spin, QDoubleSpinBox):
             slope_spin.setValue(1.0)
 
-        offset_spin = self._table.cellWidget(row, 8)
+        offset_spin = self._table.cellWidget(row, 9)
         if isinstance(offset_spin, QDoubleSpinBox):
             offset_spin.setValue(0.0)
 
@@ -434,9 +557,9 @@ class HardwareSetupPanel(QWidget):
                     voltage_item.setText("N/A")
                     continue
 
-                if det_ch.hat_id == MCC_118_ID:
+                if _is_mcc118(det_ch.hat_id):
                     value = det_ch.hat_instance.a_in_read(det_ch.channel)
-                elif det_ch.hat_id == MCC_134_ID:
+                elif _is_mcc134(det_ch.hat_id):
                     value = det_ch.hat_instance.t_in_read(det_ch.channel)
                 else:
                     voltage_item.setText("N/A")
@@ -453,7 +576,7 @@ class HardwareSetupPanel(QWidget):
                 )
 
     def _on_save_clicked(self) -> None:
-        """Handle Save & Apply button click — build config and save."""
+        """Handle Save & Apply button click — build config, save, and restart readers."""
         if self._config_manager is None:
             QMessageBox.warning(
                 self,
@@ -474,19 +597,19 @@ class HardwareSetupPanel(QWidget):
                 continue
 
             # Get unit
-            unit_edit = self._table.cellWidget(row, 5)
+            unit_edit = self._table.cellWidget(row, 6)
             unit = unit_edit.text() if isinstance(unit_edit, QLineEdit) else "V"
 
             # Get calibration type
-            cal_combo = self._table.cellWidget(row, 6)
+            cal_combo = self._table.cellWidget(row, 7)
             cal_type_str = cal_combo.currentText() if isinstance(cal_combo, QComboBox) else "linear"
             cal_type = CalibrationType(cal_type_str)
 
             # Get slope/offset
-            slope_spin = self._table.cellWidget(row, 7)
+            slope_spin = self._table.cellWidget(row, 8)
             slope = slope_spin.value() if isinstance(slope_spin, QDoubleSpinBox) else 1.0
 
-            offset_spin = self._table.cellWidget(row, 8)
+            offset_spin = self._table.cellWidget(row, 9)
             offset = offset_spin.value() if isinstance(offset_spin, QDoubleSpinBox) else 0.0
 
             # Determine channel type from measurement
@@ -543,6 +666,20 @@ class HardwareSetupPanel(QWidget):
                 "Save Failed",
                 f"Failed to save configuration:\n{e}",
             )
+            return
+
+        # Invoke the config-applied callback to restart readers
+        if self._on_config_applied_callback is not None:
+            try:
+                self._on_config_applied_callback()
+                logger.info("Config-applied callback executed successfully.")
+            except Exception as e:
+                logger.error("Config-applied callback failed: %s", e)
+                QMessageBox.warning(
+                    self,
+                    "Restart Warning",
+                    f"Configuration saved but reader restart failed:\n{e}",
+                )
 
     def _close_hat_instances(self) -> None:
         """Close any open HAT instances."""

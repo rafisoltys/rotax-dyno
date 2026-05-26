@@ -1,0 +1,16 @@
+daqhats
+PyQt6
+pyqtgraph
+fastapi
+uvicorn
+websockets
+boto3
+numpy
+scipy
+tomli-w
+
+[dev]
+hypothesis
+pytest
+pytest-qt
+pytest-asyncio

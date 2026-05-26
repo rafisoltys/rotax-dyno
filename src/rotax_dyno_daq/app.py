@@ -289,6 +289,88 @@ def main() -> int:
     hardware_setup_panel = HardwareSetupPanel(config_manager=config_manager)
     tab_widget.addTab(hardware_setup_panel, "Hardware Setup")
 
+    # --- Wire the hardware config-applied callback ---
+    def _on_hardware_config_applied() -> None:
+        """Restart HAT readers and update UI after hardware config changes.
+
+        Called by HardwareSetupPanel after Save & Apply succeeds.
+        Steps:
+        1. Stop existing HAT readers
+        2. Reload config from ConfigurationManager
+        3. Rebuild calibration profiles
+        4. Create new HAT readers with updated channels
+        5. Start new readers
+        6. Update StripChartPanel with new channels
+        """
+        nonlocal hat_readers
+
+        logger.info("Hardware config applied — restarting readers...")
+
+        # 1. Stop existing HAT readers
+        for reader in hat_readers:
+            reader.stop()
+        hat_readers.clear()
+        logger.info("Stopped all existing HAT readers.")
+
+        # 2. Reload config
+        reloaded_config = config_manager.load()
+
+        # 3. Rebuild calibration profiles
+        for channel in reloaded_config.channels:
+            calibration_engine.update_profile(channel.channel_id, channel.calibration)
+        logger.info(
+            "Rebuilt calibration profiles for %d channel(s).",
+            len(reloaded_config.channels),
+        )
+
+        # 4. Create new HAT readers
+        tc_channels, av_channels = _group_channels_by_type(reloaded_config.channels)
+
+        if tc_channels:
+            tc_by_address: dict[int, list[ChannelConfig]] = {}
+            for ch in tc_channels:
+                tc_by_address.setdefault(ch.hat_address, []).append(ch)
+            for address, channels_list in tc_by_address.items():
+                reader = ThermocoupleReader(
+                    address=address,
+                    channels=channels_list,
+                    data_bus=data_bus,
+                )
+                hat_readers.append(reader)
+
+        if av_channels:
+            av_by_address: dict[int, list[ChannelConfig]] = {}
+            for ch in av_channels:
+                av_by_address.setdefault(ch.hat_address, []).append(ch)
+            for address, channels_list in av_by_address.items():
+                reader = AnalogVoltageReader(
+                    address=address,
+                    channels=channels_list,
+                    data_bus=data_bus,
+                )
+                hat_readers.append(reader)
+
+        # 5. Start new readers
+        for reader in hat_readers:
+            reader.start()
+        logger.info("Started %d new HAT reader(s).", len(hat_readers))
+
+        # 6. Update StripChartPanel — remove old channels, add new ones
+        existing_channel_ids = list(strip_chart_panel._charts.keys())
+        for ch_id in existing_channel_ids:
+            strip_chart_panel.remove_channel(ch_id)
+
+        for ch in reloaded_config.channels:
+            if ch.enabled:
+                strip_chart_panel.add_channel(
+                    ch.channel_id,
+                    ch.calibration.unit_label,
+                    ch.display_name or ch.channel_id,
+                )
+        logger.info("StripChartPanel updated with new channels.")
+
+    hardware_setup_panel.on_config_applied = _on_hardware_config_applied
+
     # Select first tab
     tab_widget.setCurrentIndex(0)
 

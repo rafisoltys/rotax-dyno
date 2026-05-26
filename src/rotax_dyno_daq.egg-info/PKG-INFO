@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: rotax-dyno-daq
+Version: 0.1.0
+Summary: Data acquisition system for Rotax 912 ULS engine dynamometer monitoring
+Requires-Python: >=3.11
+Requires-Dist: daqhats
+Requires-Dist: PyQt6
+Requires-Dist: pyqtgraph
+Requires-Dist: fastapi
+Requires-Dist: uvicorn
+Requires-Dist: websockets
+Requires-Dist: boto3
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: tomli-w
+Provides-Extra: dev
+Requires-Dist: hypothesis; extra == "dev"
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-qt; extra == "dev"
+Requires-Dist: pytest-asyncio; extra == "dev"
