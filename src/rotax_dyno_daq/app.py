@@ -470,9 +470,29 @@ def main() -> int:
                 sample.channel_id, sample.raw_value, _bridge_count[0],
             )
 
-        calibrated = calibration_engine.apply(
-            sample.channel_id, sample.raw_value, sample.timestamp_ms
-        )
+        # For thermocouple channels (MCC 134), the raw_value is already in °C
+        # — skip CalibrationEngine voltage validation and pass through directly
+        channel_config = None
+        for ch in config_manager.config.channels:
+            if ch.channel_id == sample.channel_id:
+                channel_config = ch
+                break
+
+        if channel_config and channel_config.channel_type == ChannelType.THERMOCOUPLE:
+            # Thermocouple: raw value IS the temperature in °C, no voltage calibration needed
+            calibrated = CalibratedSample(
+                channel_id=sample.channel_id,
+                timestamp_ms=sample.timestamp_ms,
+                raw_value=sample.raw_value,
+                calibrated_value=sample.raw_value,  # Already in °C
+                unit="°C",
+                validity=sample.validity,
+            )
+        else:
+            # Analog voltage channels: apply calibration (slope/offset)
+            calibrated = calibration_engine.apply(
+                sample.channel_id, sample.raw_value, sample.timestamp_ms
+            )
 
         # Apply EMA smoothing for valid samples
         if calibrated.validity == SampleValidity.VALID:
