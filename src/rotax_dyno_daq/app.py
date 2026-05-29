@@ -454,11 +454,21 @@ def main() -> int:
 
     # --- 12. Wire DataBus subscriptions (BEFORE starting readers) ---
 
+    # Debug counter for calibration bridge
+    _bridge_count = [0]
+
     # Calibration bridge: converts RawSample → CalibratedSample with EMA smoothing
     def _calibration_bridge(sample: object) -> None:
         """Convert RawSample to CalibratedSample via CalibrationEngine and republish."""
         if not isinstance(sample, RawSample):
             return  # Already calibrated or not a sample — skip
+
+        _bridge_count[0] += 1
+        if _bridge_count[0] <= 5 or _bridge_count[0] % 100 == 0:
+            logger.info(
+                "Calibration bridge: %s raw=%.3f (count=%d)",
+                sample.channel_id, sample.raw_value, _bridge_count[0],
+            )
 
         calibrated = calibration_engine.apply(
             sample.channel_id, sample.raw_value, sample.timestamp_ms
@@ -500,7 +510,8 @@ def main() -> int:
     # --- 13. Start HAT readers ---
     for reader in hat_readers:
         reader.start()
-    logger.info("Started %d HAT reader(s).", len(hat_readers))
+    logger.info("Started %d HAT reader(s). Channels: %s", len(hat_readers),
+                [ch.channel_id for r in hat_readers for ch in r.channels])
 
     # --- 14. Run Qt event loop ---
     logger.info("Rotax Dyno DAQ system ready.")
