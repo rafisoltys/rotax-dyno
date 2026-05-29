@@ -4,22 +4,26 @@ Implements:
 - WebSocket live data streaming (Requirement 8)
 - REST API for historical data browsing (Requirement 9)
 - Static HTML5 frontend for remote monitoring (Requirement 8.1, 8.3, 8.7)
+- Simple password authentication for web access
 """
 
 from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import json
 import logging
+import secrets
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.websockets import WebSocketState
 
 from rotax_dyno_daq.core.data_bus import DataBus, Sample, SubscriptionId
@@ -30,6 +34,9 @@ from rotax_dyno_daq.storage.run_manager import RunFilters, RunManager, RunNotFou
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
+
+#: Web interface password (change in production!)
+WEB_PASSWORD: str = "rotaxinil"
 
 #: Maximum simultaneous WebSocket connections (default, configurable via SystemConfig).
 MAX_CONNECTIONS: int = 3
@@ -47,6 +54,103 @@ STALE_THRESHOLD_S: float = 3.0
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(title="Rotax Dyno DAQ", version="0.1.0")
+
+
+# --- Authentication ---
+
+# Simple token-based auth: user posts password, gets a session cookie
+_valid_tokens: set[str] = set()
+
+
+def _check_auth(request: Request) -> bool:
+    """Check if the request has a valid auth token cookie."""
+    token = request.cookies.get("rotax_auth")
+    if token and token in _valid_tokens:
+        return True
+    return False
+
+
+@app.post("/api/login")
+async def login(request: Request) -> JSONResponse:
+    """Authenticate with password and receive a session cookie."""
+    try:
+        body = await request.json()
+        password = body.get("password", "")
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid request"})
+
+    if password == WEB_PASSWORD:
+        token = secrets.token_hex(32)
+        _valid_tokens.add(token)
+        response = JSONResponse(content={"status": "ok"})
+        response.set_cookie(
+            key="rotax_auth",
+            value=token,
+            httponly=True,
+            max_age=86400,  # 24 hours
+            samesite="lax",
+        )
+        return response
+    else:
+        return JSONResponse(status_code=401, content={"error": "Invalid password"})
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """Middleware that requires authentication for all routes except login and static."""
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+
+        # Allow login endpoint and WebSocket without middleware (WS handles auth separately)
+        if path == "/api/login" or path.startswith("/ws/"):
+            return await call_next(request)
+
+        # Check auth
+        if not _check_auth(request):
+            # Serve a login page instead of the actual content
+            return HTMLResponse(content=_LOGIN_PAGE_HTML, status_code=401)
+
+        return await call_next(request)
+
+
+_LOGIN_PAGE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rotax Dyno DAQ - Login</title>
+<style>
+body { font-family: sans-serif; background: #1a1a2e; color: #eee; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+.login-box { background: #16213e; padding: 40px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); text-align: center; max-width: 350px; width: 90%; }
+h1 { margin: 0 0 20px; font-size: 1.4em; }
+input { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #333; border-radius: 4px; background: #0f3460; color: #eee; font-size: 16px; box-sizing: border-box; }
+button { width: 100%; padding: 12px; margin-top: 10px; background: #e94560; color: white; border: none; border-radius: 4px; font-size: 16px; cursor: pointer; }
+button:hover { background: #c73e54; }
+.error { color: #e94560; margin-top: 10px; display: none; }
+</style>
+</head>
+<body>
+<div class="login-box">
+<h1>Rotax Dyno DAQ</h1>
+<p>Enter password to access monitoring</p>
+<input type="password" id="pwd" placeholder="Password" autofocus>
+<button onclick="doLogin()">Login</button>
+<p class="error" id="err">Invalid password</p>
+</div>
+<script>
+document.getElementById('pwd').addEventListener('keypress', function(e) { if(e.key==='Enter') doLogin(); });
+async function doLogin() {
+    const pwd = document.getElementById('pwd').value;
+    const res = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password:pwd})});
+    if(res.ok) { window.location.reload(); }
+    else { document.getElementById('err').style.display='block'; }
+}
+</script>
+</body>
+</html>
+"""
+
+app.add_middleware(AuthMiddleware)
 
 
 # --- WebSocket Connection Manager ---
