@@ -541,7 +541,7 @@ class EngineOverlayWidget(QWidget):
             return
         self._readings[channel_id] = SensorReading(
             channel_id=channel_id, value=value,
-            last_update=time.monotonic(), stale=False,
+            last_update_time=time.monotonic(),
         )
 
     def _on_refresh(self) -> None:
@@ -552,7 +552,7 @@ class EngineOverlayWidget(QWidget):
             r = self._readings.get(ch)
             if r is None:
                 return 0.0, True
-            stale = (now - r.last_update) > STALE_THRESHOLD_SECONDS
+            stale = (now - r.last_update_time) > STALE_THRESHOLD_SECONDS
             return r.value, stale
 
         # Cylinders
