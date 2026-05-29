@@ -27,6 +27,8 @@ import uvicorn
 
 from rotax_dyno_daq.acquisition.analog_voltage_reader import AnalogVoltageReader
 from rotax_dyno_daq.acquisition.hat_reader import ThermocoupleReader
+from rotax_dyno_daq.acquisition.rpm_counter import RpmCounter, GPIO_AVAILABLE
+from rotax_dyno_daq.acquisition.serial_afr_reader import SerialAfrReader, SERIAL_AVAILABLE
 from rotax_dyno_daq.alarms.manager import AlarmManager
 from rotax_dyno_daq.calibration.engine import CalibrationEngine
 from rotax_dyno_daq.config.manager import ConfigurationManager
@@ -228,6 +230,32 @@ def main() -> int:
         max_connections=system_config.max_remote_connections,
         port=system_config.web_server_port,
     )
+
+    # --- 9a. RPM Counter (GPIO) ---
+    rpm_counter: Optional[RpmCounter] = None
+    # Check if RPM channel is configured on a HAT
+    rpm_on_hat = any(
+        ch.channel_id == "RPM" and ch.enabled for ch in system_config.channels
+    )
+    if not rpm_on_hat and GPIO_AVAILABLE:
+        # No RPM on HAT — start GPIO counter
+        rpm_counter = RpmCounter(data_bus=data_bus, gpio_pin=4)
+        rpm_counter.start()
+        logger.info("RPM counter started on GPIO 4")
+
+    # --- 9b. Serial AFR Reader ---
+    serial_afr: Optional[SerialAfrReader] = None
+    # Check if AFR channels are configured on a HAT
+    afr_on_hat = any(
+        ch.channel_id.startswith("AFR") and ch.enabled for ch in system_config.channels
+    )
+    if not afr_on_hat and SERIAL_AVAILABLE:
+        # No AFR on HAT — try serial
+        serial_afr = SerialAfrReader(
+            data_bus=data_bus, port="/dev/ttyUSB0", baudrate=9600
+        )
+        serial_afr.start()
+        logger.info("Serial AFR reader started on /dev/ttyUSB0")
 
     # --- 10. Start uvicorn in background thread ---
     _start_uvicorn_background(port=system_config.web_server_port)
@@ -544,6 +572,16 @@ def main() -> int:
     for reader in hat_readers:
         reader.stop()
     logger.info("HAT readers stopped.")
+
+    # Stop RPM counter
+    if rpm_counter is not None:
+        rpm_counter.stop()
+        logger.info("RPM counter stopped.")
+
+    # Stop serial AFR reader
+    if serial_afr is not None:
+        serial_afr.stop()
+        logger.info("Serial AFR reader stopped.")
 
     # Flush CSV logger
     if csv_logger.is_active:
