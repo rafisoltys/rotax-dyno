@@ -548,6 +548,19 @@ class EngineOverlayWidget(QWidget):
         """Update all sub-widgets with latest readings."""
         now = time.monotonic()
 
+        # Debug: log readings count periodically
+        if hasattr(self, '_refresh_count'):
+            self._refresh_count += 1
+        else:
+            self._refresh_count = 0
+        if self._refresh_count % 50 == 0 and self._readings:
+            import logging as _log
+            _log.getLogger(__name__).info(
+                "EngineOverlay refresh #%d: %d readings: %s",
+                self._refresh_count, len(self._readings),
+                {k: f"{v.value:.1f}" for k, v in list(self._readings.items())[:4]}
+            )
+
         def get(ch: str) -> tuple[float, bool]:
             r = self._readings.get(ch)
             if r is None:
