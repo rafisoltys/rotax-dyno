@@ -448,3 +448,171 @@ class EnvDisplay(QWidget):
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
             value_text,
         )
+
+
+# --- Constants for stale detection ---
+STALE_THRESHOLD_SECONDS: float = 3.0
+DEFAULT_SENSOR_POSITIONS: dict[str, tuple[int, int]] = {}  # Not used in new layout but kept for compat
+
+
+class EngineOverlayWidget(QWidget):
+    """Instrument-style engine overlay dashboard.
+
+    Combines CylinderPanels, OilPanel, RpmDisplay, CircularGauges, and EnvDisplay
+    into a grid layout matching the instrument panel design.
+
+    Subscribes to DataBus for live data updates and refreshes at 10 Hz.
+    """
+
+    def __init__(
+        self,
+        data_bus: Optional["DataBus"] = None,
+        alarm_manager=None,
+        sensor_positions: Optional[dict[str, tuple[int, int]]] = None,
+        background_image_path: Optional[Path] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        from rotax_dyno_daq.core.data_bus import DataBus as _DataBus
+
+        self._data_bus = data_bus
+        self._alarm_manager = alarm_manager
+        self._readings: dict[str, SensorReading] = {}
+        self._subscription_ids: list[int] = []
+
+        self.setStyleSheet("background-color: #f0f0f0;")
+        self.setMinimumSize(600, 500)
+
+        # Create sub-widgets
+        from PyQt6.QtWidgets import QGridLayout
+
+        layout = QGridLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # Cylinder panels
+        self._cyl1 = CylinderPanel("Cyl. 1", "EGT1", "AFR1")
+        self._cyl2 = CylinderPanel("Cyl. 2", "EGT2", "AFR2")
+        self._cyl3 = CylinderPanel("Cyl. 3", "EGT3", "AFR3")
+        self._cyl4 = CylinderPanel("Cyl. 4", "EGT4", "AFR4")
+
+        # Oil panel
+        self._oil_panel = OilPanel()
+
+        # RPM display
+        self._rpm_display = RpmDisplay()
+
+        # Circular gauges
+        self._power_gauge = CircularGauge("Power")
+        self._throttle_gauge = CircularGauge("Throttle")
+
+        # Environment display
+        self._env_display = EnvDisplay()
+
+        # Layout: row 0-1 = cylinders + oil
+        layout.addWidget(self._cyl1, 0, 0)
+        layout.addWidget(self._oil_panel, 0, 1, 2, 1)
+        layout.addWidget(self._cyl3, 0, 2)
+        layout.addWidget(self._cyl2, 1, 0)
+        layout.addWidget(self._cyl4, 1, 2)
+
+        # Row 2 = Power + RPM + Throttle
+        layout.addWidget(self._power_gauge, 2, 0)
+        layout.addWidget(self._rpm_display, 2, 1)
+        layout.addWidget(self._throttle_gauge, 2, 2)
+
+        # Row 3 = IAT + CLT
+        layout.addWidget(self._env_display, 3, 0, 1, 3)
+
+        # Subscribe to DataBus
+        if self._data_bus is not None:
+            sub_id = self._data_bus.subscribe("*", self._on_sample)
+            self._subscription_ids.append(sub_id)
+
+        # Refresh timer at 10 Hz
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(100)
+        self._refresh_timer.timeout.connect(self._on_refresh)
+        self._refresh_timer.start()
+
+    def _on_sample(self, sample) -> None:
+        """Handle incoming sample from DataBus."""
+        channel_id = getattr(sample, "channel_id", None)
+        value = getattr(sample, "calibrated_value", None)
+        if channel_id is None or value is None:
+            return
+        self._readings[channel_id] = SensorReading(
+            channel_id=channel_id, value=value,
+            last_update=time.monotonic(), stale=False,
+        )
+
+    def _on_refresh(self) -> None:
+        """Update all sub-widgets with latest readings."""
+        now = time.monotonic()
+
+        def get(ch: str) -> tuple[float, bool]:
+            r = self._readings.get(ch)
+            if r is None:
+                return 0.0, True
+            stale = (now - r.last_update) > STALE_THRESHOLD_SECONDS
+            return r.value, stale
+
+        # Cylinders
+        for i, (cyl, egt_ch, afr_ch) in enumerate([
+            (self._cyl1, "EGT1", "AFR1"),
+            (self._cyl2, "EGT2", "AFR2"),
+            (self._cyl3, "EGT3", "AFR3"),
+            (self._cyl4, "EGT4", "AFR4"),
+        ]):
+            egt_val, egt_stale = get(egt_ch)
+            afr_val, afr_stale = get(afr_ch)
+            cyl.set_egt(egt_val, egt_stale)
+            cyl.set_afr(afr_val, afr_stale)
+            cyl.update()
+
+        # Oil
+        oilt_val, oilt_stale = get("OilTemp")
+        oilp_val, oilp_stale = get("OilP")
+        self._oil_panel._temp_gauge.set_value(oilt_val / 150.0, f"{oilt_val:.0f}", oilt_stale)
+        self._oil_panel._press_gauge.set_value(oilp_val / 10.0, f"{oilp_val:.1f}", oilp_stale)
+        self._oil_panel.update()
+
+        # RPM
+        rpm_val, rpm_stale = get("RPM")
+        self._rpm_display.set_rpm(rpm_val, rpm_stale)
+        self._rpm_display.update()
+
+        # Power (RPM/5800 * 100%)
+        power_pct = min(rpm_val / 5800.0, 1.0) if rpm_val > 0 else 0.0
+        self._power_gauge.set_value(power_pct, rpm_stale)
+        self._power_gauge.update()
+
+        # Throttle (ChargeP)
+        charge_val, charge_stale = get("ChargeP")
+        if charge_val == 0.0:
+            charge_val, charge_stale = get("Charge")
+        throttle_pct = min(charge_val / 2.5, 1.0) if charge_val > 0 else 0.0
+        self._throttle_gauge.set_value(throttle_pct, charge_stale)
+        self._throttle_gauge.update()
+
+        # IAT + CLT
+        iat_val, iat_stale = get("IAT")
+        clt_val, clt_stale = get("CLT")
+        self._env_display.set_iat(iat_val / 60.0, f"{iat_val:.0f}°C", iat_stale)
+        self._env_display.set_clt(clt_val / 120.0, f"{clt_val:.0f}°C", clt_stale)
+        self._env_display.update()
+
+    def is_channel_stale(self, channel_id: str) -> bool:
+        """Check if a channel is stale (backward compat)."""
+        r = self._readings.get(channel_id)
+        if r is None:
+            return True
+        return (time.monotonic() - r.last_update) > STALE_THRESHOLD_SECONDS
+
+    def cleanup(self) -> None:
+        """Stop timer and unsubscribe from DataBus."""
+        self._refresh_timer.stop()
+        if self._data_bus is not None:
+            for sub_id in self._subscription_ids:
+                self._data_bus.unsubscribe(sub_id)
+            self._subscription_ids.clear()
