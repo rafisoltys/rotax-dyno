@@ -484,17 +484,15 @@ class EngineOverlayWidget(QWidget):
         self.setMinimumSize(600, 500)
 
         # Create sub-widgets
-        from PyQt6.QtWidgets import QGridLayout
-
         layout = QGridLayout(self)
         layout.setSpacing(8)
         layout.setContentsMargins(10, 10, 10, 10)
 
         # Cylinder panels
-        self._cyl1 = CylinderPanel("Cyl. 1", "EGT1", "AFR1")
-        self._cyl2 = CylinderPanel("Cyl. 2", "EGT2", "AFR2")
-        self._cyl3 = CylinderPanel("Cyl. 3", "EGT3", "AFR3")
-        self._cyl4 = CylinderPanel("Cyl. 4", "EGT4", "AFR4")
+        self._cyl1 = CylinderPanel(1)
+        self._cyl2 = CylinderPanel(2)
+        self._cyl3 = CylinderPanel(3)
+        self._cyl4 = CylinderPanel(4)
 
         # Oil panel
         self._oil_panel = OilPanel()
@@ -566,25 +564,26 @@ class EngineOverlayWidget(QWidget):
         ]):
             egt_val, egt_stale = get(egt_ch)
             afr_val, afr_stale = get(afr_ch)
-            cyl.set_egt(egt_val, egt_stale)
-            cyl.set_afr(afr_val, afr_stale)
+            cyl.set_egt(min(egt_val / 900.0, 1.0), f"{egt_val:.0f}")
+            cyl.set_afr(min(afr_val / 20.0, 1.0), f"{afr_val:.1f}")
+            cyl.set_stale(egt_stale and afr_stale)
             cyl.update()
 
         # Oil
         oilt_val, oilt_stale = get("OilTemp")
         oilp_val, oilp_stale = get("OilP")
-        self._oil_panel._temp_gauge.set_value(oilt_val / 150.0, f"{oilt_val:.0f}", oilt_stale)
-        self._oil_panel._press_gauge.set_value(oilp_val / 10.0, f"{oilp_val:.1f}", oilp_stale)
+        self._oil_panel.temp_gauge.set_value(oilt_val / 150.0, f"{oilt_val:.0f}", oilt_stale)
+        self._oil_panel.press_gauge.set_value(oilp_val / 10.0, f"{oilp_val:.1f}", oilp_stale)
         self._oil_panel.update()
 
         # RPM
         rpm_val, rpm_stale = get("RPM")
-        self._rpm_display.set_rpm(rpm_val, rpm_stale)
+        self._rpm_display.set_value(f"{rpm_val:.0f}", rpm_stale)
         self._rpm_display.update()
 
         # Power (RPM/5800 * 100%)
         power_pct = min(rpm_val / 5800.0, 1.0) if rpm_val > 0 else 0.0
-        self._power_gauge.set_value(power_pct, rpm_stale)
+        self._power_gauge.set_value(power_pct, f"{int(power_pct*100)}%", rpm_stale)
         self._power_gauge.update()
 
         # Throttle (ChargeP)
@@ -592,7 +591,7 @@ class EngineOverlayWidget(QWidget):
         if charge_val == 0.0:
             charge_val, charge_stale = get("Charge")
         throttle_pct = min(charge_val / 2.5, 1.0) if charge_val > 0 else 0.0
-        self._throttle_gauge.set_value(throttle_pct, charge_stale)
+        self._throttle_gauge.set_value(throttle_pct, f"{int(throttle_pct*100)}%", charge_stale)
         self._throttle_gauge.update()
 
         # IAT + CLT
