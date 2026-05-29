@@ -96,19 +96,30 @@ async def login(request: Request) -> JSONResponse:
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Middleware that requires authentication for all routes except login and static."""
+    """Middleware that requires authentication for all routes except login."""
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
 
-        # Allow login endpoint and WebSocket without middleware (WS handles auth separately)
-        if path == "/api/login" or path.startswith("/ws/"):
+        # Allow login endpoint without auth
+        if path == "/api/login":
             return await call_next(request)
 
-        # Check auth
-        if not _check_auth(request):
-            # Serve a login page instead of the actual content
-            return HTMLResponse(content=_LOGIN_PAGE_HTML, status_code=401)
+        # Allow WebSocket connections (they handle auth via query param if needed)
+        if path.startswith("/ws/"):
+            return await call_next(request)
+
+        # Allow static files needed for login page
+        if path.startswith("/static/"):
+            return await call_next(request)
+
+        # Check auth cookie
+        token = request.cookies.get("rotax_auth")
+        if token and token in _valid_tokens:
+            return await call_next(request)
+
+        # Not authenticated — return login page with 200 (not 401, to avoid browser popup)
+        return HTMLResponse(content=_LOGIN_PAGE_HTML, status_code=200)
 
         return await call_next(request)
 
