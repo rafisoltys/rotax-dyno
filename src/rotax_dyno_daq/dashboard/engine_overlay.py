@@ -1,23 +1,30 @@
-"""Engine Overlay Widget - renders sensor values at physical locations on engine diagram.
+"""Engine Overlay Widget - instrument-style dashboard for Rotax 912 ULS.
 
-Displays a Rotax 912 ULS engine background image with sensor readings positioned
-at their physical measurement locations. Readings are color-coded based on alarm
-severity and show stale-data indicators when channels haven't been updated within
-3 seconds.
+Displays cylinder EGT/AFR panels, oil temperature/pressure gauges, RPM readout,
+power/throttle circular gauges, and IAT/CLT displays in a grid layout matching
+the instrument panel design.
 
 Requirements: 5.1, 5.2, 5.3, 5.6, 10.5
 """
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import QRectF, Qt, QTimer
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QBrush
+from PyQt6.QtWidgets import (
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from rotax_dyno_daq.core.data_bus import DataBus, Sample, SubscriptionId
 from rotax_dyno_daq.core.enums import AlarmSeverity
@@ -25,437 +32,419 @@ from rotax_dyno_daq.core.enums import AlarmSeverity
 
 # --- Constants ---
 
-#: Time in seconds after which a channel is considered stale.
 STALE_THRESHOLD_SECONDS: float = 3.0
-
-#: Refresh interval in milliseconds (10 Hz minimum).
 REFRESH_INTERVAL_MS: int = 100
+MAX_RPM: float = 5800.0
 
-#: Color mapping for alarm severity levels.
-SEVERITY_COLORS: dict[AlarmSeverity, QColor] = {
-    AlarmSeverity.NORMAL: QColor(0, 180, 0),       # Green
-    AlarmSeverity.WARNING: QColor(255, 191, 0),    # Amber
-    AlarmSeverity.CRITICAL: QColor(220, 20, 20),   # Red
+# Default sensor positions (channel_id -> (x, y) for layout reference)
+DEFAULT_SENSOR_POSITIONS: dict[str, tuple[int, int]] = {
+    "EGT1": (0, 0), "AFR1": (0, 1),
+    "EGT2": (1, 0), "AFR2": (1, 1),
+    "EGT3": (0, 2), "AFR3": (0, 3),
+    "EGT4": (1, 2), "AFR4": (1, 3),
+    "OilTemp": (0, 4), "OilP": (0, 5),
+    "RPM": (2, 1),
+    "ChargeP": (2, 0),
+    "IAT": (3, 0), "CLT": (3, 1),
 }
 
-#: Color for stale data indicator.
-STALE_COLOR: QColor = QColor(128, 128, 128)  # Gray
+# Colors
+COLOR_BG = QColor(26, 26, 46)
+COLOR_PANEL = QColor(34, 34, 58)
+COLOR_BORDER = QColor(58, 58, 90)
+COLOR_TEXT = QColor(232, 232, 240)
+COLOR_TEXT_DIM = QColor(136, 136, 136)
+COLOR_RED = QColor(229, 57, 53)
+COLOR_BLUE = QColor(21, 101, 192)
+COLOR_OLIVE = QColor(158, 157, 36)
+COLOR_LIGHTBLUE = QColor(79, 195, 247)
+COLOR_GREEN = QColor(67, 160, 71)
+COLOR_STALE = QColor(102, 102, 102)
+COLOR_BAR_BG = QColor(51, 51, 51)
 
-#: Default background color when no image is available.
-DEFAULT_BACKGROUND_COLOR: QColor = QColor(30, 30, 40)
-
-
-# --- Data Structures ---
+# Gauge Ranges
+RANGES: dict[str, tuple[float, float]] = {
+    "EGT1": (0, 900), "EGT2": (0, 900), "EGT3": (0, 900), "EGT4": (0, 900),
+    "AFR1": (10, 18), "AFR2": (10, 18), "AFR3": (10, 18), "AFR4": (10, 18),
+    "OilTemp": (0, 150), "OilP": (0, 6),
+    "RPM": (0, 6000),
+    "ChargeP": (0, 100),
+    "IAT": (0, 60), "CLT": (0, 120),
+}
 
 
 @dataclass
 class SensorReading:
-    """Holds the latest reading for a sensor channel."""
+    """Holds the latest state for a channel."""
 
     channel_id: str
     value: float = 0.0
     unit: str = ""
     severity: AlarmSeverity = AlarmSeverity.NORMAL
-    last_update_time: float = 0.0  # time.monotonic() timestamp
-    is_stale: bool = False
+    last_update_time: float = 0.0
+
+    @property
+    def is_stale(self) -> bool:
+        if self.last_update_time == 0.0:
+            return True
+        return (time.monotonic() - self.last_update_time) >= STALE_THRESHOLD_SECONDS
 
 
-@dataclass
-class SensorPosition:
-    """Position and display configuration for a sensor on the overlay."""
-
-    channel_id: str
-    x: int
-    y: int
-    display_name: str = ""
+def _pct(value: float, channel: str) -> float:
+    """Return 0-1 fraction of value within channel range."""
+    lo, hi = RANGES.get(channel, (0, 100))
+    if hi == lo:
+        return 0.0
+    return max(0.0, min(1.0, (value - lo) / (hi - lo)))
 
 
-# --- Default Sensor Positions for Rotax 912 ULS ---
-
-DEFAULT_SENSOR_POSITIONS: dict[str, tuple[int, int]] = {
-    "EGT1": (120, 80),
-    "EGT2": (280, 80),
-    "EGT3": (120, 180),
-    "EGT4": (280, 180),
-    "CLT": (200, 300),
-    "OilTemp": (350, 300),
-    "IAT": (60, 300),
-    "OilP": (350, 380),
-    "ChargeP": (60, 380),
-    "RPM": (200, 420),
-    "AFR1": (100, 480),
-    "AFR2": (200, 480),
-    "AFR3": (300, 480),
-    "AFR4": (400, 480),
-}
+# --- Custom Widgets ---
 
 
-class EngineOverlayWidget(QWidget):
-    """Renders sensor values at physical locations on a Rotax 912 ULS engine diagram.
+class CylinderPanel(QWidget):
+    """Panel showing EGT and AFR for one cylinder with horizontal bar gauges."""
 
-    Features:
-    - Background image rendering (engine diagram) or plain background fallback
-    - Sensor value labels positioned at predefined coordinates
-    - Color-coded backgrounds based on AlarmSeverity (green/amber/red)
-    - Stale-data indicator (gray with strikethrough) for channels not updated in 3+ seconds
-    - 10 Hz refresh rate via QTimer
-    - DataBus subscription for live data updates
+    def __init__(self, cyl_number: int, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._cyl_number = cyl_number
+        self._egt_fraction = 0.0
+        self._afr_fraction = 0.0
+        self._egt_text = "---"
+        self._afr_text = "---"
+        self._stale = True
+        self.setMinimumSize(160, 70)
 
-    Args:
-        data_bus: The DataBus instance to subscribe to for live sensor data.
-        alarm_manager: Optional AlarmManager for querying alarm severity.
-        sensor_positions: Optional dict mapping channel_id to (x, y) coordinates.
-            Defaults to standard Rotax 912 ULS positions.
-        background_image_path: Optional path to the engine diagram image file.
-        parent: Optional parent QWidget.
-    """
+    def set_egt(self, fraction: float, text: str) -> None:
+        self._egt_fraction = max(0.0, min(1.0, fraction))
+        self._egt_text = text
+
+    def set_afr(self, fraction: float, text: str) -> None:
+        self._afr_fraction = max(0.0, min(1.0, fraction))
+        self._afr_text = text
+
+    def set_stale(self, stale: bool) -> None:
+        self._stale = stale
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Panel background
+        painter.setPen(QPen(COLOR_BORDER, 1))
+        painter.setBrush(COLOR_PANEL)
+        painter.drawRoundedRect(QRectF(1, 1, w - 2, h - 2), 6, 6)
+
+        # Title
+        painter.setPen(COLOR_TEXT_DIM if not self._stale else COLOR_STALE)
+        painter.setFont(QFont("Sans", 8, QFont.Weight.Bold))
+        painter.drawText(
+            QRectF(0, 4, w, 16), Qt.AlignmentFlag.AlignCenter,
+            f"Cyl. {self._cyl_number}"
+        )
+
+        # EGT row
+        self._draw_bar_row(painter, 24, "EGT", self._egt_fraction,
+                           self._egt_text, COLOR_RED, w)
+        # AFR row
+        self._draw_bar_row(painter, 46, "AFR", self._afr_fraction,
+                           self._afr_text, COLOR_BLUE, w)
+        painter.end()
+
+    def _draw_bar_row(
+        self, painter: QPainter, y: int, label: str,
+        fraction: float, value_text: str, color: QColor, w: int
+    ) -> None:
+        margin = 8
+        label_w = 30
+        value_w = 44
+        bar_h = 10
+        bar_x = margin + label_w + 4
+        bar_w = w - bar_x - value_w - margin - 4
+
+        text_color = COLOR_TEXT if not self._stale else COLOR_STALE
+        painter.setPen(text_color)
+        painter.setFont(QFont("Sans", 8, QFont.Weight.Bold))
+        painter.drawText(QRectF(margin, y, label_w, bar_h + 4),
+                         Qt.AlignmentFlag.AlignVCenter, label)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(COLOR_BAR_BG)
+        painter.drawRoundedRect(QRectF(bar_x, y + 2, bar_w, bar_h), 3, 3)
+
+        fill_color = color if not self._stale else COLOR_STALE
+        painter.setBrush(fill_color)
+        fill_w = bar_w * fraction
+        painter.drawRoundedRect(QRectF(bar_x, y + 2, fill_w, bar_h), 3, 3)
+
+        painter.setPen(text_color)
+        painter.setFont(QFont("Sans", 9, QFont.Weight.Bold))
+        painter.drawText(
+            QRectF(bar_x + bar_w + 4, y, value_w, bar_h + 4),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+            value_text,
+        )
+
+
+class BarGauge(QWidget):
+    """Vertical bar gauge with value label."""
 
     def __init__(
-        self,
-        data_bus: Optional[DataBus] = None,
-        alarm_manager=None,
-        sensor_positions: Optional[dict[str, tuple[int, int]]] = None,
-        background_image_path: Optional[Path] = None,
+        self, label: str, unit: str, color: QColor,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
+        self._label = label
+        self._unit = unit
+        self._color = color
+        self._fraction = 0.0
+        self._value_text = "---"
+        self._stale = True
+        self.setMinimumSize(40, 100)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
-        self._data_bus = data_bus
-        self._alarm_manager = alarm_manager
-        self._sensor_positions: dict[str, tuple[int, int]] = (
-            sensor_positions if sensor_positions is not None else DEFAULT_SENSOR_POSITIONS.copy()
-        )
-        self._background_pixmap: Optional[QPixmap] = None
-        self._readings: dict[str, SensorReading] = {}
-        self._subscription_ids: list[SubscriptionId] = []
-
-        # Initialize readings for all configured sensor positions
-        for channel_id in self._sensor_positions:
-            self._readings[channel_id] = SensorReading(channel_id=channel_id)
-
-        # Load background image if provided
-        if background_image_path is not None:
-            self._load_background_image(background_image_path)
-
-        # Subscribe to DataBus for live updates
-        if self._data_bus is not None:
-            self._subscribe_to_data_bus()
-
-        # Set up refresh timer at 10 Hz (100ms interval)
-        self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(REFRESH_INTERVAL_MS)
-        self._refresh_timer.timeout.connect(self._on_refresh_tick)
-        self._refresh_timer.start()
-
-        # Widget configuration
-        self.setMinimumSize(500, 550)
-
-    def _load_background_image(self, path: Path) -> None:
-        """Load the engine diagram background image.
-
-        Args:
-            path: Path to the image file.
-        """
-        pixmap = QPixmap(str(path))
-        if not pixmap.isNull():
-            self._background_pixmap = pixmap
-
-    def _subscribe_to_data_bus(self) -> None:
-        """Subscribe to the DataBus wildcard topic for all channel updates."""
-        if self._data_bus is not None:
-            sub_id = self._data_bus.subscribe("*", self._on_sample_received)
-            self._subscription_ids.append(sub_id)
-
-    def _on_sample_received(self, sample: Sample) -> None:
-        """Handle incoming sample from the DataBus.
-
-        Updates the internal reading state for the corresponding channel.
-
-        Args:
-            sample: A CalibratedSample or similar object with channel_id,
-                calibrated_value, and unit attributes.
-        """
-        channel_id = getattr(sample, "channel_id", None)
-        calibrated_value = getattr(sample, "calibrated_value", None)
-        unit = getattr(sample, "unit", "")
-
-        if channel_id is None or calibrated_value is None:
-            return
-
-        if channel_id in self._readings:
-            reading = self._readings[channel_id]
-            reading.value = calibrated_value
-            reading.unit = unit
-            reading.last_update_time = time.monotonic()
-            reading.is_stale = False
-
-    def _on_refresh_tick(self) -> None:
-        """Called at 10 Hz to update stale status and trigger repaint."""
-        current_time = time.monotonic()
-
-        for reading in self._readings.values():
-            if reading.last_update_time > 0:
-                elapsed = current_time - reading.last_update_time
-                reading.is_stale = elapsed >= STALE_THRESHOLD_SECONDS
-            else:
-                # Never received data - consider stale
-                reading.is_stale = True
-
-        # Update alarm severities from AlarmManager if available
-        self._update_alarm_severities()
-
-        # Trigger repaint
-        self.update()
-
-    def _update_alarm_severities(self) -> None:
-        """Query the AlarmManager for current alarm states and update readings."""
-        if self._alarm_manager is None:
-            return
-
-        # Get all active alarms
-        active_alarms = self._alarm_manager.get_active_alarms()
-        active_alarm_channels: dict[str, AlarmSeverity] = {}
-        for alarm in active_alarms:
-            channel_id = alarm.channel_id
-            # If multiple alarms for same channel, use highest severity
-            if channel_id in active_alarm_channels:
-                if alarm.severity == AlarmSeverity.CRITICAL:
-                    active_alarm_channels[channel_id] = AlarmSeverity.CRITICAL
-            else:
-                active_alarm_channels[channel_id] = alarm.severity
-
-        # Update readings
-        for channel_id, reading in self._readings.items():
-            if channel_id in active_alarm_channels:
-                reading.severity = active_alarm_channels[channel_id]
-            else:
-                reading.severity = AlarmSeverity.NORMAL
+    def set_value(self, fraction: float, text: str, stale: bool = False) -> None:
+        self._fraction = max(0.0, min(1.0, fraction))
+        self._value_text = text
+        self._stale = stale
 
     def paintEvent(self, event) -> None:
-        """Render the engine overlay with background and sensor labels.
-
-        Args:
-            event: The QPaintEvent (unused but required by Qt).
-        """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
 
-        # Draw background
-        self._draw_background(painter)
+        label_h = 16
+        value_h = 18
+        bar_x = (w - 20) // 2
+        bar_w = 20
+        bar_top = label_h + 4
+        bar_h = h - bar_top - value_h - 20
 
-        # Draw sensor labels at their positions
-        for channel_id, (x, y) in self._sensor_positions.items():
-            reading = self._readings.get(channel_id)
-            if reading is not None:
-                self._draw_sensor_label(painter, x, y, channel_id, reading)
+        # Label
+        painter.setPen(COLOR_TEXT_DIM if not self._stale else COLOR_STALE)
+        painter.setFont(QFont("Sans", 8))
+        painter.drawText(QRectF(0, 0, w, label_h), Qt.AlignmentFlag.AlignCenter, self._label)
 
+        # Bar track
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(COLOR_BAR_BG)
+        painter.drawRoundedRect(QRectF(bar_x, bar_top, bar_w, bar_h), 3, 3)
+
+        # Bar fill
+        fill_h = bar_h * self._fraction
+        color = self._color if not self._stale else COLOR_STALE
+        painter.setBrush(color)
+        painter.drawRoundedRect(
+            QRectF(bar_x, bar_top + bar_h - fill_h, bar_w, fill_h), 3, 3
+        )
+
+        # Value text
+        painter.setPen(COLOR_TEXT if not self._stale else COLOR_STALE)
+        painter.setFont(QFont("Sans", 9, QFont.Weight.Bold))
+        painter.drawText(
+            QRectF(0, bar_top + bar_h + 4, w, value_h),
+            Qt.AlignmentFlag.AlignCenter, self._value_text,
+        )
+
+        # Unit
+        painter.setPen(COLOR_TEXT_DIM)
+        painter.setFont(QFont("Sans", 7))
+        painter.drawText(
+            QRectF(0, bar_top + bar_h + 20, w, 14),
+            Qt.AlignmentFlag.AlignCenter, self._unit,
+        )
         painter.end()
 
-    def _draw_background(self, painter: QPainter) -> None:
-        """Draw the background image or a plain colored background.
 
-        Args:
-            painter: The QPainter to draw with.
-        """
-        if self._background_pixmap is not None and not self._background_pixmap.isNull():
-            # Scale image to fit widget while maintaining aspect ratio
-            scaled = self._background_pixmap.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            # Center the image
-            x_offset = (self.width() - scaled.width()) // 2
-            y_offset = (self.height() - scaled.height()) // 2
-            painter.drawPixmap(x_offset, y_offset, scaled)
-        else:
-            # Plain background fallback
-            painter.fillRect(self.rect(), DEFAULT_BACKGROUND_COLOR)
+class CircularGauge(QWidget):
+    """Circular arc gauge for percentage values (Power, Throttle)."""
 
-    def _draw_sensor_label(
-        self,
-        painter: QPainter,
-        x: int,
-        y: int,
-        channel_id: str,
-        reading: SensorReading,
+    def __init__(
+        self, label: str, color: QColor = COLOR_BLUE,
+        parent: Optional[QWidget] = None,
     ) -> None:
-        """Draw a single sensor label at the specified position.
+        super().__init__(parent)
+        self._label = label
+        self._color = color
+        self._fraction = 0.0
+        self._value_text = "---%"
+        self._stale = True
+        self.setMinimumSize(120, 140)
+        self.setMaximumSize(140, 160)
 
-        Each label shows:
-        - Channel name (top line)
-        - Current value with unit (bottom line)
-        - Color-coded background based on severity
-        - Stale indicator (gray background + strikethrough) if data is stale
+    def set_value(self, fraction: float, text: str, stale: bool = False) -> None:
+        self._fraction = max(0.0, min(1.0, fraction))
+        self._value_text = text
+        self._stale = stale
 
-        Args:
-            painter: The QPainter to draw with.
-            x: X coordinate for the label center.
-            y: Y coordinate for the label top.
-            channel_id: The channel identifier string.
-            reading: The current SensorReading data.
-        """
-        # Determine colors
-        if reading.is_stale:
-            bg_color = STALE_COLOR
-            text_color = QColor(200, 200, 200)
-        else:
-            bg_color = SEVERITY_COLORS.get(reading.severity, SEVERITY_COLORS[AlarmSeverity.NORMAL])
-            text_color = QColor(255, 255, 255)
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        cx, cy = w // 2, (h - 20) // 2
+        radius = min(cx, cy) - 10
 
-        # Label dimensions
-        label_width = 90
-        label_height = 40
-        label_rect = QRectF(
-            x - label_width / 2,
-            y,
-            label_width,
-            label_height,
+        # Background arc (240 degrees, from 150 to -90 in Qt angles)
+        pen = QPen(COLOR_BAR_BG, 8)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        rect = QRectF(cx - radius, cy - radius, radius * 2, radius * 2)
+        # Draw 240 degree arc starting from bottom-left
+        painter.drawArc(rect, -30 * 16, -240 * 16)
+
+        # Value arc
+        color = self._color if not self._stale else COLOR_STALE
+        pen = QPen(color, 8)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        span = int(self._fraction * 240 * 16)
+        painter.drawArc(rect, -30 * 16, -span)
+
+        # Center text
+        painter.setPen(COLOR_TEXT if not self._stale else COLOR_STALE)
+        painter.setFont(QFont("Sans", 12, QFont.Weight.Bold))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._value_text)
+
+        # Label below
+        painter.setPen(COLOR_TEXT_DIM)
+        painter.setFont(QFont("Sans", 8, QFont.Weight.Bold))
+        painter.drawText(
+            QRectF(0, h - 18, w, 18),
+            Qt.AlignmentFlag.AlignCenter, self._label,
         )
+        painter.end()
 
-        # Draw background rectangle with rounded corners
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg_color)
-        painter.drawRoundedRect(label_rect, 4, 4)
 
-        # Draw border
-        border_pen = QPen(QColor(60, 60, 60))
-        border_pen.setWidth(1)
-        painter.setPen(border_pen)
-        painter.drawRoundedRect(label_rect, 4, 4)
+class OilPanel(QWidget):
+    """Panel with two vertical bar gauges for oil temp and pressure."""
 
-        # Set up fonts
-        name_font = QFont("Sans", 8)
-        name_font.setBold(True)
-        value_font = QFont("Sans", 9)
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
 
-        # Draw channel name
+        title = QLabel("OIL")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("color: #888; font-size: 9px; font-weight: bold;")
+        layout.addWidget(title)
+
+        gauges_layout = QHBoxLayout()
+        gauges_layout.setSpacing(16)
+
+        self.temp_gauge = BarGauge("\u00B0C", "\u00B0C", COLOR_RED)
+        self.press_gauge = BarGauge("bar", "bar", COLOR_OLIVE)
+
+        gauges_layout.addWidget(self.temp_gauge)
+        gauges_layout.addWidget(self.press_gauge)
+        layout.addLayout(gauges_layout)
+
+        self.setMinimumSize(120, 120)
+
+
+class RpmDisplay(QWidget):
+    """Large RPM number display."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._value_text = "---"
+        self._stale = True
+        self.setMinimumSize(180, 80)
+
+    def set_value(self, text: str, stale: bool = False) -> None:
+        self._value_text = text
+        self._stale = stale
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        color = COLOR_RED if not self._stale else COLOR_STALE
+        painter.setPen(color)
+        font = QFont("Sans", 36, QFont.Weight.Black)
+        painter.setFont(font)
+        painter.drawText(QRectF(0, 0, w, h - 16), Qt.AlignmentFlag.AlignCenter,
+                         self._value_text)
+
+        painter.setPen(COLOR_TEXT_DIM)
+        painter.setFont(QFont("Sans", 10, QFont.Weight.Bold))
+        painter.drawText(QRectF(0, h - 20, w, 20), Qt.AlignmentFlag.AlignCenter, "RPM")
+        painter.end()
+
+
+class EnvDisplay(QWidget):
+    """Horizontal bar display for IAT and CLT values."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._iat_fraction = 0.0
+        self._clt_fraction = 0.0
+        self._iat_text = "---\u00B0C"
+        self._clt_text = "---\u00B0C"
+        self._iat_stale = True
+        self._clt_stale = True
+        self.setMinimumSize(300, 40)
+
+    def set_iat(self, fraction: float, text: str, stale: bool = False) -> None:
+        self._iat_fraction = max(0.0, min(1.0, fraction))
+        self._iat_text = text
+        self._iat_stale = stale
+
+    def set_clt(self, fraction: float, text: str, stale: bool = False) -> None:
+        self._clt_fraction = max(0.0, min(1.0, fraction))
+        self._clt_text = text
+        self._clt_stale = stale
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Panel background
+        painter.setPen(QPen(COLOR_BORDER, 1))
+        painter.setBrush(COLOR_PANEL)
+        painter.drawRoundedRect(QRectF(1, 1, w - 2, h - 2), 6, 6)
+
+        half_w = w // 2
+        # IAT (left half)
+        self._draw_inline_gauge(painter, 12, h // 2 - 6, half_w - 24,
+                                "IAT", self._iat_fraction, self._iat_text,
+                                COLOR_OLIVE, self._iat_stale)
+        # CLT (right half)
+        self._draw_inline_gauge(painter, half_w + 12, h // 2 - 6, half_w - 24,
+                                "CLT", self._clt_fraction, self._clt_text,
+                                COLOR_LIGHTBLUE, self._clt_stale)
+        painter.end()
+
+    def _draw_inline_gauge(
+        self, painter: QPainter, x: int, y: int, available_w: int,
+        label: str, fraction: float, value_text: str, color: QColor, stale: bool
+    ) -> None:
+        label_w = 30
+        value_w = 50
+        bar_h = 10
+        bar_w = available_w - label_w - value_w - 8
+
+        text_color = COLOR_TEXT if not stale else COLOR_STALE
         painter.setPen(text_color)
-        painter.setFont(name_font)
-        name_rect = QRectF(
-            label_rect.x(),
-            label_rect.y() + 2,
-            label_rect.width(),
-            label_height / 2,
+        painter.setFont(QFont("Sans", 8, QFont.Weight.Bold))
+        painter.drawText(QRectF(x, y, label_w, bar_h + 4),
+                         Qt.AlignmentFlag.AlignVCenter, label)
+
+        bar_x = x + label_w + 4
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(COLOR_BAR_BG)
+        painter.drawRoundedRect(QRectF(bar_x, y + 2, bar_w, bar_h), 3, 3)
+
+        fill_color = color if not stale else COLOR_STALE
+        painter.setBrush(fill_color)
+        fill_w = bar_w * fraction
+        painter.drawRoundedRect(QRectF(bar_x, y + 2, fill_w, bar_h), 3, 3)
+
+        painter.setPen(text_color)
+        painter.setFont(QFont("Sans", 9, QFont.Weight.Bold))
+        painter.drawText(
+            QRectF(bar_x + bar_w + 4, y, value_w, bar_h + 4),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+            value_text,
         )
-        painter.drawText(name_rect, Qt.AlignmentFlag.AlignCenter, channel_id)
-
-        # Draw value with unit
-        painter.setFont(value_font)
-        if reading.last_update_time > 0:
-            value_text = f"{reading.value:.1f} {reading.unit}"
-        else:
-            value_text = "---"
-
-        value_rect = QRectF(
-            label_rect.x(),
-            label_rect.y() + label_height / 2,
-            label_rect.width(),
-            label_height / 2,
-        )
-        painter.drawText(value_rect, Qt.AlignmentFlag.AlignCenter, value_text)
-
-        # Draw strikethrough for stale data
-        if reading.is_stale and reading.last_update_time > 0:
-            stale_pen = QPen(QColor(255, 80, 80))
-            stale_pen.setWidth(2)
-            painter.setPen(stale_pen)
-            mid_y = int(label_rect.y() + label_height / 2)
-            painter.drawLine(
-                int(label_rect.x() + 5),
-                mid_y,
-                int(label_rect.x() + label_rect.width() - 5),
-                mid_y,
-            )
-
-    def set_sensor_positions(self, positions: dict[str, tuple[int, int]]) -> None:
-        """Update the sensor position mapping.
-
-        Args:
-            positions: Dict mapping channel_id to (x, y) coordinates.
-        """
-        self._sensor_positions = positions
-        # Ensure readings exist for all positions
-        for channel_id in positions:
-            if channel_id not in self._readings:
-                self._readings[channel_id] = SensorReading(channel_id=channel_id)
-        self.update()
-
-    def set_background_image(self, path: Path) -> None:
-        """Set or change the background image.
-
-        Args:
-            path: Path to the new background image file.
-        """
-        self._load_background_image(path)
-        self.update()
-
-    def update_reading(
-        self,
-        channel_id: str,
-        value: float,
-        unit: str = "",
-        severity: AlarmSeverity = AlarmSeverity.NORMAL,
-    ) -> None:
-        """Manually update a sensor reading (alternative to DataBus subscription).
-
-        Args:
-            channel_id: The channel identifier.
-            value: The current calibrated value.
-            unit: The engineering unit string.
-            severity: The alarm severity for color coding.
-        """
-        if channel_id not in self._readings:
-            self._readings[channel_id] = SensorReading(channel_id=channel_id)
-
-        reading = self._readings[channel_id]
-        reading.value = value
-        reading.unit = unit
-        reading.severity = severity
-        reading.last_update_time = time.monotonic()
-        reading.is_stale = False
-
-    def get_reading(self, channel_id: str) -> Optional[SensorReading]:
-        """Get the current reading for a channel.
-
-        Args:
-            channel_id: The channel identifier.
-
-        Returns:
-            The SensorReading or None if channel not found.
-        """
-        return self._readings.get(channel_id)
-
-    def is_channel_stale(self, channel_id: str) -> bool:
-        """Check if a channel's data is stale (not updated within 3 seconds).
-
-        Args:
-            channel_id: The channel identifier.
-
-        Returns:
-            True if the channel data is stale, False otherwise.
-        """
-        reading = self._readings.get(channel_id)
-        if reading is None:
-            return True
-        if reading.last_update_time == 0:
-            return True
-        elapsed = time.monotonic() - reading.last_update_time
-        return elapsed >= STALE_THRESHOLD_SECONDS
-
-    def cleanup(self) -> None:
-        """Stop the refresh timer and unsubscribe from the DataBus."""
-        self._refresh_timer.stop()
-        if self._data_bus is not None:
-            for sub_id in self._subscription_ids:
-                self._data_bus.unsubscribe(sub_id)
-            self._subscription_ids.clear()
-
-    def closeEvent(self, event) -> None:
-        """Handle widget close by cleaning up resources.
-
-        Args:
-            event: The QCloseEvent.
-        """
-        self.cleanup()
-        super().closeEvent(event)

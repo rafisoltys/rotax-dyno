@@ -1,650 +1,245 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rotax 912 ULS - Remote Monitor</title>
-    <style>
-        /* --- Reset & Base --- */
-        *, *::before, *::after {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rotax Dyno DAQ</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', sans-serif; background: #f0f0f0; color: #222; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 10px; }
+.dashboard { display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: auto auto auto; gap: 10px; max-width: 900px; width: 100%; }
+.panel { background: #fff; border-radius: 12px; padding: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+.cyl-panel { display: flex; flex-direction: column; gap: 8px; }
+.cyl-title { font-size: 14px; color: #666; font-weight: 600; }
+.gauge-row { display: flex; align-items: center; gap: 8px; }
+.gauge-label { font-size: 14px; font-weight: 700; min-width: 35px; }
+.bar-egt { width: 20px; height: 18px; background: #d32f2f; border-radius: 2px; }
+.bar-afr { width: 6px; height: 22px; background: #1565c0; border-radius: 2px; }
+.gauge-value { font-size: 22px; font-weight: 700; }
+.gauge-value.egt { color: #222; }
+.gauge-value.afr { color: #222; }
 
-        :root {
-            --color-bg: #1e1e28;
-            --color-surface: #2a2a3a;
-            --color-text: #e0e0e0;
-            --color-text-dim: #999;
-            --color-normal: #00b400;
-            --color-warning: #ffbf00;
-            --color-critical: #dc1414;
-            --color-stale: #808080;
-            --color-connected: #00b400;
-            --color-disconnected: #dc1414;
-            --color-border: #3c3c4c;
-            --radius: 6px;
-        }
+.oil-panel { display: flex; flex-direction: column; align-items: center; }
+.oil-title { font-size: 14px; color: #666; font-weight: 600; margin-bottom: 5px; }
+.oil-gauges { display: flex; gap: 20px; align-items: flex-end; height: 120px; }
+.oil-bar-container { display: flex; flex-direction: column; align-items: center; }
+.oil-bar-label { font-size: 12px; color: #666; margin-bottom: 4px; }
+.oil-bar { width: 24px; height: 100px; background: #eee; border-radius: 4px; position: relative; overflow: hidden; }
+.oil-bar-fill { position: absolute; bottom: 0; width: 100%; border-radius: 4px; transition: height 0.3s; }
+.oil-bar-fill.temp { background: #d32f2f; }
+.oil-bar-fill.press { background: #6d4c00; }
+.oil-bar-value { font-size: 16px; font-weight: 700; margin-top: 4px; }
 
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: var(--color-bg);
-            color: var(--color-text);
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }
+.rpm-row { grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; gap: 20px; }
+.arc-gauge { width: 100px; height: 100px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.arc-gauge svg { width: 90px; height: 90px; }
+.arc-label { font-size: 11px; color: #666; margin-top: 2px; }
+.arc-value { font-size: 18px; font-weight: 700; color: #1565c0; }
+.rpm-display { text-align: center; }
+.rpm-value { font-size: 64px; font-weight: 900; color: #d32f2f; line-height: 1; }
+.rpm-unit { font-size: 20px; color: #666; font-weight: 400; }
 
-        /* --- Header / Status Bar --- */
-        .header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 12px 20px;
-            background: var(--color-surface);
-            border-bottom: 1px solid var(--color-border);
-            flex-shrink: 0;
-        }
+.bottom-row { grid-column: 1 / -1; display: flex; justify-content: center; gap: 40px; padding: 10px; }
+.temp-gauge { display: flex; align-items: center; gap: 8px; }
+.temp-label { font-size: 14px; font-weight: 600; color: #666; }
+.temp-bar { width: 12px; height: 50px; background: #e3f2fd; border-radius: 6px; position: relative; overflow: hidden; }
+.temp-bar-fill { position: absolute; bottom: 0; width: 100%; background: #1565c0; border-radius: 6px; transition: height 0.3s; }
+.temp-value { font-size: 18px; font-weight: 700; }
 
-        .header h1 {
-            font-size: 1.1rem;
-            font-weight: 600;
-        }
-
-        .status-bar {
-            display: flex;
-            gap: 16px;
-            align-items: center;
-            font-size: 0.85rem;
-        }
-
-        .status-indicator {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .status-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: var(--color-disconnected);
-            transition: background 0.3s;
-        }
-
-        .status-dot.connected {
-            background: var(--color-connected);
-        }
-
-        .status-dot.acquiring {
-            background: var(--color-connected);
-            animation: pulse 1.5s infinite;
-        }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.4; }
-        }
-
-        .last-update {
-            font-size: 0.75rem;
-            color: var(--color-text-dim);
-        }
-
-        /* --- Main Content --- */
-        .main-content {
-            flex: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-            overflow: auto;
-        }
-
-        /* --- Engine Overlay --- */
-        .engine-overlay {
-            position: relative;
-            width: 100%;
-            max-width: 700px;
-            aspect-ratio: 7 / 6;
-            background: #222233;
-            border-radius: var(--radius);
-            border: 1px solid var(--color-border);
-        }
-
-        .engine-overlay .engine-label {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            font-size: 1.4rem;
-            color: var(--color-text-dim);
-            opacity: 0.3;
-            pointer-events: none;
-            text-align: center;
-            white-space: nowrap;
-        }
-
-        /* --- Sensor Labels --- */
-        .sensor-label {
-            position: absolute;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            min-width: 80px;
-            padding: 4px 8px;
-            border-radius: 4px;
-            border: 1px solid rgba(60, 60, 60, 0.8);
-            text-align: center;
-            transform: translate(-50%, -50%);
-            transition: background 0.3s, border-color 0.3s;
-            font-size: 0.75rem;
-        }
-
-        .sensor-label .channel-name {
-            font-weight: 700;
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 2px;
-        }
-
-        .sensor-label .channel-value {
-            font-size: 0.9rem;
-            font-weight: 600;
-            font-variant-numeric: tabular-nums;
-        }
-
-        /* Severity colors */
-        .sensor-label.normal {
-            background: rgba(0, 180, 0, 0.25);
-            border-color: var(--color-normal);
-        }
-
-        .sensor-label.warning {
-            background: rgba(255, 191, 0, 0.3);
-            border-color: var(--color-warning);
-        }
-
-        .sensor-label.critical {
-            background: rgba(220, 20, 20, 0.3);
-            border-color: var(--color-critical);
-            animation: alarm-flash 0.8s infinite;
-        }
-
-        @keyframes alarm-flash {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.6; }
-        }
-
-        .sensor-label.stale {
-            background: rgba(128, 128, 128, 0.25);
-            border-color: var(--color-stale);
-        }
-
-        .sensor-label.stale .channel-value {
-            text-decoration: line-through;
-            color: var(--color-stale);
-        }
-
-        .sensor-label.no-data {
-            background: rgba(60, 60, 60, 0.4);
-            border-color: var(--color-border);
-        }
-
-        .sensor-label.no-data .channel-value {
-            color: var(--color-text-dim);
-        }
-
-        /* --- Section Groups --- */
-        .section-title {
-            position: absolute;
-            font-size: 0.65rem;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            color: var(--color-text-dim);
-            opacity: 0.7;
-        }
-
-        /* --- Disconnected Overlay --- */
-        .disconnected-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0, 0, 0, 0.7);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 1000;
-            opacity: 0;
-            pointer-events: none;
-            transition: opacity 0.3s;
-        }
-
-        .disconnected-overlay.visible {
-            opacity: 1;
-            pointer-events: auto;
-        }
-
-        .disconnected-message {
-            background: var(--color-surface);
-            padding: 32px 48px;
-            border-radius: var(--radius);
-            text-align: center;
-            border: 1px solid var(--color-critical);
-        }
-
-        .disconnected-message h2 {
-            color: var(--color-critical);
-            margin-bottom: 8px;
-        }
-
-        .disconnected-message p {
-            color: var(--color-text-dim);
-            font-size: 0.9rem;
-        }
-
-        .reconnect-countdown {
-            margin-top: 12px;
-            font-size: 0.85rem;
-            color: var(--color-text-dim);
-        }
-
-        /* --- Responsive --- */
-        @media (max-width: 600px) {
-            .header {
-                flex-direction: column;
-                gap: 8px;
-                padding: 10px 12px;
-            }
-
-            .engine-overlay {
-                max-width: 100%;
-            }
-
-            .sensor-label {
-                min-width: 60px;
-                font-size: 0.65rem;
-                padding: 3px 5px;
-            }
-
-            .sensor-label .channel-value {
-                font-size: 0.75rem;
-            }
-        }
-
-        @media (max-width: 400px) {
-            .sensor-label {
-                min-width: 50px;
-                padding: 2px 4px;
-            }
-
-            .sensor-label .channel-name {
-                font-size: 0.6rem;
-            }
-
-            .sensor-label .channel-value {
-                font-size: 0.7rem;
-            }
-        }
-    </style>
+.status-bar { width: 100%; max-width: 900px; display: flex; justify-content: space-between; padding: 8px 0; font-size: 12px; color: #666; }
+.disconnected-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 999; justify-content: center; align-items: center; }
+.disconnected-overlay.show { display: flex; }
+.disconnected-msg { background: #d32f2f; color: white; padding: 20px 40px; border-radius: 8px; font-size: 18px; }
+.stale .gauge-value, .stale .oil-bar-value, .stale .rpm-value, .stale .temp-value, .stale .arc-value { color: #999 !important; }
+</style>
 </head>
 <body>
-    <!-- Header with status indicators -->
-    <header class="header">
-        <h1>Rotax 912 ULS &mdash; Remote Monitor</h1>
-        <div class="status-bar">
-            <div class="status-indicator">
-                <div class="status-dot" id="connectionDot"></div>
-                <span id="connectionStatus">Disconnected</span>
-            </div>
-            <div class="status-indicator">
-                <div class="status-dot" id="acquisitionDot"></div>
-                <span id="acquisitionStatus">Inactive</span>
-            </div>
-            <span class="last-update" id="lastUpdate"></span>
-        </div>
-    </header>
+<div class="status-bar">
+<span id="connectionStatus">Connecting...</span>
+<span id="lastUpdate">Last update: --</span>
+</div>
 
-    <!-- Engine Overlay View -->
-    <main class="main-content">
-        <div class="engine-overlay" id="engineOverlay">
-            <div class="engine-label">ROTAX 912 ULS</div>
+<div class="dashboard">
+<!-- Cyl 1 -->
+<div class="panel cyl-panel" id="cyl1">
+<div class="cyl-title">Cyl. 1</div>
+<div class="gauge-row"><span class="gauge-label">EGT</span><div class="bar-egt"></div><span class="gauge-value egt" id="v-EGT1">---</span></div>
+<div class="gauge-row"><span class="gauge-label">AFR</span><div class="bar-afr"></div><span class="gauge-value afr" id="v-AFR1">---</span></div>
+</div>
 
-            <!-- Section titles -->
-            <span class="section-title" style="top: 5%; left: 25%;">EGT</span>
-            <span class="section-title" style="top: 5%; right: 10%;">TEMPS</span>
-            <span class="section-title" style="top: 55%; left: 8%;">PRESSURE</span>
-            <span class="section-title" style="top: 75%; left: 25%;">AFR</span>
+<!-- OIL -->
+<div class="panel oil-panel">
+<div class="oil-title">OIL</div>
+<div class="oil-gauges">
+<div class="oil-bar-container">
+<div class="oil-bar-label">°C</div>
+<div class="oil-bar"><div class="oil-bar-fill temp" id="bar-OILT" style="height:0%"></div></div>
+<div class="oil-bar-value" id="v-OILT">---</div>
+</div>
+<div class="oil-bar-container">
+<div class="oil-bar-label">bar</div>
+<div class="oil-bar"><div class="oil-bar-fill press" id="bar-OILP" style="height:0%"></div></div>
+<div class="oil-bar-value" id="v-OILP">---</div>
+</div>
+</div>
+</div>
 
-            <!-- Sensor labels will be created dynamically -->
-        </div>
-    </main>
+<!-- Cyl 3 -->
+<div class="panel cyl-panel" id="cyl3">
+<div class="cyl-title">Cyl. 3</div>
+<div class="gauge-row"><span class="gauge-label">EGT</span><div class="bar-egt"></div><span class="gauge-value egt" id="v-EGT3">---</span></div>
+<div class="gauge-row"><span class="gauge-label">AFR</span><div class="bar-afr"></div><span class="gauge-value afr" id="v-AFR3">---</span></div>
+</div>
 
-    <!-- Disconnected overlay -->
-    <div class="disconnected-overlay" id="disconnectedOverlay">
-        <div class="disconnected-message">
-            <h2>&#x26A0; Connection Lost</h2>
-            <p>Unable to reach the DAQ system.</p>
-            <div class="reconnect-countdown" id="reconnectCountdown">Reconnecting in 5s...</div>
-        </div>
-    </div>
+<!-- Cyl 2 -->
+<div class="panel cyl-panel" id="cyl2">
+<div class="cyl-title">Cyl. 2</div>
+<div class="gauge-row"><span class="gauge-label">EGT</span><div class="bar-egt"></div><span class="gauge-value egt" id="v-EGT2">---</span></div>
+<div class="gauge-row"><span class="gauge-label">AFR</span><div class="bar-afr"></div><span class="gauge-value afr" id="v-AFR2">---</span></div>
+</div>
 
-    <script>
-    (function() {
-        'use strict';
+<!-- Empty center -->
+<div></div>
 
-        // --- Configuration ---
-        var RECONNECT_INTERVAL_MS = 5000;
-        var STALE_THRESHOLD_S = 3.0;
+<!-- Cyl 4 -->
+<div class="panel cyl-panel" id="cyl4">
+<div class="cyl-title">Cyl. 4</div>
+<div class="gauge-row"><span class="gauge-label">EGT</span><div class="bar-egt"></div><span class="gauge-value egt" id="v-EGT4">---</span></div>
+<div class="gauge-row"><span class="gauge-label">AFR</span><div class="bar-afr"></div><span class="gauge-value afr" id="v-AFR4">---</span></div>
+</div>
 
-        // Sensor positions as percentage of overlay dimensions.
-        // Mirrors DEFAULT_SENSOR_POSITIONS from engine_overlay.py
-        var SENSOR_POSITIONS = {
-            'EGT1': { x: 17, y: 15, name: 'EGT 1' },
-            'EGT2': { x: 40, y: 15, name: 'EGT 2' },
-            'EGT3': { x: 17, y: 33, name: 'EGT 3' },
-            'EGT4': { x: 40, y: 33, name: 'EGT 4' },
-            'CLT':  { x: 70, y: 15, name: 'CLT' },
-            'OilTemp': { x: 70, y: 33, name: 'Oil Temp' },
-            'IAT':  { x: 90, y: 15, name: 'IAT' },
-            'OilP': { x: 17, y: 60, name: 'Oil P' },
-            'ChargeP': { x: 40, y: 60, name: 'Charge P' },
-            'RPM':  { x: 70, y: 55, name: 'RPM' },
-            'AFR1': { x: 15, y: 82, name: 'AFR 1' },
-            'AFR2': { x: 38, y: 82, name: 'AFR 2' },
-            'AFR3': { x: 61, y: 82, name: 'AFR 3' },
-            'AFR4': { x: 84, y: 82, name: 'AFR 4' }
-        };
+<!-- RPM row -->
+<div class="panel rpm-row">
+<div class="arc-gauge">
+<svg viewBox="0 0 100 100"><path d="M20 80 A40 40 0 1 1 80 80" fill="none" stroke="#ddd" stroke-width="8" stroke-linecap="round"/><path id="arc-power" d="M20 80 A40 40 0 0 1 50 20" fill="none" stroke="#1565c0" stroke-width="8" stroke-linecap="round"/></svg>
+<div class="arc-value" id="v-Power">0%</div>
+<div class="arc-label">Power</div>
+</div>
+<div class="rpm-display">
+<span class="rpm-value" id="v-RPM">0</span><span class="rpm-unit"> RPM</span>
+</div>
+<div class="arc-gauge">
+<svg viewBox="0 0 100 100"><path d="M20 80 A40 40 0 1 1 80 80" fill="none" stroke="#ddd" stroke-width="8" stroke-linecap="round"/><path id="arc-throttle" d="M20 80 A40 40 0 0 1 50 20" fill="none" stroke="#1565c0" stroke-width="8" stroke-linecap="round"/></svg>
+<div class="arc-value" id="v-Throttle">0%</div>
+<div class="arc-label">Throttle</div>
+</div>
+</div>
 
-        // --- State ---
-        var ws = null;
-        var connected = false;
-        var reconnectTimer = null;
-        var reconnectCountdown = 5;
-        var countdownInterval = null;
-        var lastUpdateTime = null;
+<!-- Bottom: IAT + CLT -->
+<div class="panel bottom-row">
+<div class="temp-gauge">
+<span class="temp-label">IAT</span>
+<div class="temp-bar"><div class="temp-bar-fill" id="bar-IAT" style="height:0%"></div></div>
+<span class="temp-value" id="v-IAT">---</span><span>°C</span>
+</div>
+<div class="temp-gauge">
+<span class="temp-label">CLT</span>
+<div class="temp-bar"><div class="temp-bar-fill" id="bar-CLT" style="height:0%"></div></div>
+<span class="temp-value" id="v-CLT">---</span><span>°C</span>
+</div>
+</div>
+</div>
 
-        // --- DOM References ---
-        var connectionDot = document.getElementById('connectionDot');
-        var connectionStatus = document.getElementById('connectionStatus');
-        var acquisitionDot = document.getElementById('acquisitionDot');
-        var acquisitionStatus = document.getElementById('acquisitionStatus');
-        var lastUpdateEl = document.getElementById('lastUpdate');
-        var engineOverlay = document.getElementById('engineOverlay');
-        var disconnectedOverlay = document.getElementById('disconnectedOverlay');
-        var reconnectCountdownEl = document.getElementById('reconnectCountdown');
+<div class="disconnected-overlay" id="disconnectedOverlay">
+<div class="disconnected-msg">Connection Lost — Reconnecting...</div>
+</div>
 
-        // --- Initialize Sensor Labels ---
-        function createSensorLabels() {
-            var keys = Object.keys(SENSOR_POSITIONS);
-            for (var i = 0; i < keys.length; i++) {
-                var channelId = keys[i];
-                var config = SENSOR_POSITIONS[channelId];
-                var label = document.createElement('div');
-                label.className = 'sensor-label no-data';
-                label.id = 'sensor-' + channelId;
-                label.style.left = config.x + '%';
-                label.style.top = config.y + '%';
-                label.innerHTML =
-                    '<span class="channel-name">' + config.name + '</span>' +
-                    '<span class="channel-value">---</span>';
-                engineOverlay.appendChild(label);
-            }
+<script>
+const STALE_MS = 3000;
+const RECONNECT_MS = 5000;
+let ws = null;
+let lastData = {};
+let lastUpdateTime = 0;
+
+function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws/live');
+    ws.onopen = () => {
+        document.getElementById('connectionStatus').textContent = 'Connected';
+        document.getElementById('disconnectedOverlay').classList.remove('show');
+    };
+    ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.channels) { updateDashboard(msg.channels); }
+        lastUpdateTime = Date.now();
+        document.getElementById('lastUpdate').textContent = 'Last update: ' + new Date().toLocaleTimeString();
+    };
+    ws.onclose = () => {
+        document.getElementById('connectionStatus').textContent = 'Disconnected';
+        document.getElementById('disconnectedOverlay').classList.add('show');
+        setTimeout(connect, RECONNECT_MS);
+    };
+    ws.onerror = () => { ws.close(); };
+}
+
+function updateDashboard(channels) {
+    // Map channel names to display
+    const map = {'EGT1':'EGT1','EGT2':'EGT2','EGT3':'EGT3','EGT4':'EGT4',
+                 'AFR1':'AFR1','AFR2':'AFR2','AFR3':'AFR3','AFR4':'AFR4',
+                 'OilTemp':'OILT','OILT':'OILT','OilP':'OILP','OILP':'OILP',
+                 'RPM':'RPM','IAT':'IAT','CLT':'CLT','ChargeP':'Charge','Charge':'Charge'};
+
+    for (const [chId, data] of Object.entries(channels)) {
+        const col = map[chId] || chId;
+        const val = data.value;
+        const el = document.getElementById('v-' + col);
+        if (el) {
+            if (col.startsWith('EGT')) el.textContent = Math.round(val);
+            else if (col.startsWith('AFR')) el.textContent = val.toFixed(1);
+            else if (col === 'RPM') el.textContent = Math.round(val);
+            else if (col === 'OILT') el.textContent = Math.round(val);
+            else if (col === 'OILP') el.textContent = val.toFixed(1);
+            else if (col === 'IAT' || col === 'CLT') el.textContent = Math.round(val);
+            else el.textContent = val.toFixed(1);
         }
-
-        // --- WebSocket Connection ---
-        function getWebSocketUrl() {
-            var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            return protocol + '//' + window.location.host + '/ws/live';
+        // Update bars
+        if (col === 'OILT') { document.getElementById('bar-OILT').style.height = Math.min(val/150*100, 100) + '%'; }
+        if (col === 'OILP') { document.getElementById('bar-OILP').style.height = Math.min(val/10*100, 100) + '%'; }
+        if (col === 'IAT') { document.getElementById('bar-IAT').style.height = Math.min(val/60*100, 100) + '%'; }
+        if (col === 'CLT') { document.getElementById('bar-CLT').style.height = Math.min(val/120*100, 100) + '%'; }
+        // RPM -> Power% (proxy: RPM/5800*100)
+        if (col === 'RPM') {
+            const pct = Math.min(Math.round(val/5800*100), 100);
+            document.getElementById('v-Power').textContent = pct + '%';
+            updateArc('arc-power', pct);
         }
-
-        function connect() {
-            if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
-                return;
-            }
-
-            try {
-                ws = new WebSocket(getWebSocketUrl());
-            } catch (e) {
-                onDisconnect();
-                return;
-            }
-
-            ws.onopen = function() {
-                connected = true;
-                clearReconnectTimer();
-                updateConnectionUI(true);
-                hideDisconnectedOverlay();
-            };
-
-            ws.onmessage = function(event) {
-                try {
-                    var data = JSON.parse(event.data);
-                    handleMessage(data);
-                } catch (e) {
-                    // Ignore malformed messages
-                }
-            };
-
-            ws.onclose = function() {
-                onDisconnect();
-            };
-
-            ws.onerror = function() {
-                // onclose will fire after onerror
-            };
+        // Charge -> Throttle%
+        if (col === 'Charge') {
+            const pct = Math.min(Math.round(val/2.5*100), 100);
+            document.getElementById('v-Throttle').textContent = pct + '%';
+            updateArc('arc-throttle', pct);
         }
+    }
+}
 
-        function onDisconnect() {
-            connected = false;
-            ws = null;
-            updateConnectionUI(false);
-            showDisconnectedOverlay();
-            scheduleReconnect();
-        }
+function updateArc(id, pct) {
+    // SVG arc from 0-100%: sweep from bottom-left to proportional position
+    const el = document.getElementById(id);
+    if (!el) return;
+    const angle = (pct / 100) * 240 - 120; // -120 to +120 degrees
+    const rad = angle * Math.PI / 180;
+    const cx = 50, cy = 50, r = 40;
+    const startAngle = (150) * Math.PI / 180; // start at bottom-left
+    const endAngle = startAngle - (pct / 100) * (4.19); // 240 degrees sweep
+    const x1 = cx + r * Math.cos(startAngle);
+    const y1 = cy + r * Math.sin(startAngle);
+    const x2 = cx + r * Math.cos(startAngle - (pct/100)*4.19);
+    const y2 = cy + r * Math.sin(startAngle - (pct/100)*4.19);
+    const largeArc = pct > 50 ? 1 : 0;
+    if (pct <= 0) { el.setAttribute('d', 'M0 0'); return; }
+    el.setAttribute('d', `M${x1} ${y1} A${r} ${r} 0 ${largeArc} 0 ${x2} ${y2}`);
+}
 
-        function scheduleReconnect() {
-            clearReconnectTimer();
-            reconnectCountdown = Math.ceil(RECONNECT_INTERVAL_MS / 1000);
-            updateCountdownDisplay();
+// Stale detection
+setInterval(() => {
+    if (Date.now() - lastUpdateTime > STALE_MS && lastUpdateTime > 0) {
+        document.querySelector('.dashboard').classList.add('stale');
+    } else {
+        document.querySelector('.dashboard').classList.remove('stale');
+    }
+}, 1000);
 
-            countdownInterval = setInterval(function() {
-                reconnectCountdown--;
-                if (reconnectCountdown <= 0) {
-                    clearInterval(countdownInterval);
-                    countdownInterval = null;
-                }
-                updateCountdownDisplay();
-            }, 1000);
-
-            reconnectTimer = setTimeout(function() {
-                connect();
-            }, RECONNECT_INTERVAL_MS);
-        }
-
-        function clearReconnectTimer() {
-            if (reconnectTimer) {
-                clearTimeout(reconnectTimer);
-                reconnectTimer = null;
-            }
-            if (countdownInterval) {
-                clearInterval(countdownInterval);
-                countdownInterval = null;
-            }
-        }
-
-        // --- Message Handling ---
-        // The server sends two message formats:
-        //   Active:   {"channels": {"EGT1": {...}, ...}, "timestamp": float}
-        //   Inactive: {"status": "inactive", "last_values": {"EGT1": {...}, ...}}
-        // Also handles legacy format: {"type": "data", "channels": {...}}
-        //                             {"type": "status", "acquiring": bool, ...}
-        function handleMessage(data) {
-            lastUpdateTime = new Date();
-            updateLastUpdateDisplay();
-
-            if (data.status === 'inactive') {
-                // Acquisition inactive message
-                updateAcquisitionUI(false);
-                updateSensorReadingsInactive(data.last_values || {});
-            } else if (data.channels) {
-                // Active acquisition data message
-                updateAcquisitionUI(true);
-                updateSensorReadings(data.channels);
-            } else if (data.type === 'data' && data.channels) {
-                // Legacy format: {"type": "data", "channels": {...}}
-                updateAcquisitionUI(true);
-                updateSensorReadings(data.channels);
-            } else if (data.type === 'status') {
-                // Legacy format: {"type": "status", "acquiring": bool}
-                updateAcquisitionUI(!!data.acquiring);
-            }
-        }
-
-        function updateSensorReadings(channels) {
-            var keys = Object.keys(SENSOR_POSITIONS);
-            for (var i = 0; i < keys.length; i++) {
-                var channelId = keys[i];
-                var labelEl = document.getElementById('sensor-' + channelId);
-                if (!labelEl) continue;
-
-                var channelData = channels[channelId];
-                var valueEl = labelEl.querySelector('.channel-value');
-
-                if (!channelData) {
-                    // No data for this channel
-                    labelEl.className = 'sensor-label no-data';
-                    valueEl.textContent = '---';
-                    continue;
-                }
-
-                // Determine severity class based on alarm severity and stale status
-                var severityClass = 'normal';
-                if (channelData.stale) {
-                    severityClass = 'stale';
-                } else if (channelData.validity === 'invalid') {
-                    severityClass = 'critical';
-                } else if (channelData.severity === 'critical') {
-                    severityClass = 'critical';
-                } else if (channelData.severity === 'warning') {
-                    severityClass = 'warning';
-                }
-
-                labelEl.className = 'sensor-label ' + severityClass;
-
-                // Format value
-                valueEl.textContent = formatValue(channelData.value, channelData.unit);
-            }
-        }
-
-        function updateSensorReadingsInactive(lastValues) {
-            var keys = Object.keys(SENSOR_POSITIONS);
-            for (var i = 0; i < keys.length; i++) {
-                var channelId = keys[i];
-                var labelEl = document.getElementById('sensor-' + channelId);
-                if (!labelEl) continue;
-
-                var channelData = lastValues[channelId];
-                var valueEl = labelEl.querySelector('.channel-value');
-
-                if (!channelData) {
-                    labelEl.className = 'sensor-label no-data';
-                    valueEl.textContent = '---';
-                    continue;
-                }
-
-                // Show last known values with stale styling (acquisition inactive)
-                labelEl.className = 'sensor-label stale';
-                valueEl.textContent = formatValue(channelData.value, channelData.unit);
-            }
-        }
-
-        function formatValue(value, unit) {
-            if (value === null || value === undefined) return '---';
-            // Format based on magnitude
-            var formatted;
-            if (Math.abs(value) >= 1000) {
-                formatted = value.toFixed(0);
-            } else if (Math.abs(value) >= 100) {
-                formatted = value.toFixed(1);
-            } else {
-                formatted = value.toFixed(1);
-            }
-            return formatted + (unit ? ' ' + unit : '');
-        }
-
-        // --- UI Updates ---
-        function updateConnectionUI(isConnected) {
-            if (isConnected) {
-                connectionDot.className = 'status-dot connected';
-                connectionStatus.textContent = 'Connected';
-            } else {
-                connectionDot.className = 'status-dot';
-                connectionStatus.textContent = 'Disconnected';
-            }
-        }
-
-        function updateAcquisitionUI(isActive) {
-            if (isActive) {
-                acquisitionDot.className = 'status-dot acquiring';
-                acquisitionStatus.textContent = 'Acquiring';
-            } else {
-                acquisitionDot.className = 'status-dot';
-                acquisitionStatus.textContent = 'Inactive';
-            }
-        }
-
-        function updateLastUpdateDisplay() {
-            if (lastUpdateTime && lastUpdateEl) {
-                var h = lastUpdateTime.getHours().toString().padStart(2, '0');
-                var m = lastUpdateTime.getMinutes().toString().padStart(2, '0');
-                var s = lastUpdateTime.getSeconds().toString().padStart(2, '0');
-                lastUpdateEl.textContent = 'Last update: ' + h + ':' + m + ':' + s;
-            }
-        }
-
-        function showDisconnectedOverlay() {
-            disconnectedOverlay.classList.add('visible');
-        }
-
-        function hideDisconnectedOverlay() {
-            disconnectedOverlay.classList.remove('visible');
-        }
-
-        function updateCountdownDisplay() {
-            if (reconnectCountdownEl) {
-                if (reconnectCountdown > 0) {
-                    reconnectCountdownEl.textContent = 'Reconnecting in ' + reconnectCountdown + 's...';
-                } else {
-                    reconnectCountdownEl.textContent = 'Reconnecting...';
-                }
-            }
-        }
-
-        // --- Stale detection (client-side fallback) ---
-        // If no message received for STALE_THRESHOLD_S, mark all channels stale
-        setInterval(function() {
-            if (!lastUpdateTime) return;
-            var elapsed = (Date.now() - lastUpdateTime.getTime()) / 1000;
-            if (elapsed >= STALE_THRESHOLD_S && connected) {
-                var keys = Object.keys(SENSOR_POSITIONS);
-                for (var i = 0; i < keys.length; i++) {
-                    var labelEl = document.getElementById('sensor-' + keys[i]);
-                    if (labelEl && labelEl.className.indexOf('no-data') === -1) {
-                        labelEl.className = 'sensor-label stale';
-                    }
-                }
-            }
-        }, 1000);
-
-        // --- Initialization ---
-        createSensorLabels();
-        connect();
-    })();
-    </script>
+connect();
+</script>
 </body>
 </html>
