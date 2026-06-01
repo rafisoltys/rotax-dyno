@@ -137,6 +137,7 @@ class StripChartWidget(pg.PlotWidget):
 
         Scrolls the X-axis to show the most recent time_window_seconds
         of data and updates the curve with current buffer contents.
+        Also updates the title with the current (latest) value.
         """
         if not self._timestamps:
             return
@@ -152,6 +153,11 @@ class StripChartWidget(pg.PlotWidget):
         latest_time = times[-1]
         x_min = latest_time - self.time_window_seconds
         self.setXRange(x_min, latest_time, padding=0)
+
+        # Update title with current value
+        current_value = values[-1]
+        title = f"{self._display_name}: {current_value:.2f} {self.unit}"
+        self.setTitle(title, color="w", size="10pt")
 
     def set_time_window(self, seconds: int) -> None:
         """Update the visible time window.
