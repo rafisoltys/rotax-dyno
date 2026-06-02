@@ -522,6 +522,20 @@ def main() -> int:
                 sample.channel_id, sample.raw_value, sample.timestamp_ms
             )
 
+        # Clamp negative pressure values to 0 (dropout/glitch filter for 4-20mA sensors)
+        if (calibrated.validity == SampleValidity.VALID
+                and channel_config
+                and channel_config.channel_type == ChannelType.PRESSURE
+                and calibrated.calibrated_value < 0):
+            calibrated = CalibratedSample(
+                channel_id=calibrated.channel_id,
+                timestamp_ms=calibrated.timestamp_ms,
+                raw_value=calibrated.raw_value,
+                calibrated_value=0.0,
+                unit=calibrated.unit,
+                validity=calibrated.validity,
+            )
+
         # Apply EMA smoothing for valid samples
         if calibrated.validity == SampleValidity.VALID:
             channel_id = calibrated.channel_id
