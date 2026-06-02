@@ -575,11 +575,24 @@ def main() -> int:
     logger.info("Started %d HAT reader(s). Channels: %s", len(hat_readers),
                 [ch.channel_id for r in hat_readers for ch in r.channels])
 
-    # --- 13a. CSV flush timer (1 Hz) ---
+    # --- 13a. CSV flush timer (configurable rate) ---
+    _flush_interval_ms = [1000]  # Default 1 Hz (1000ms)
+
     flush_timer = QtTimer()
-    flush_timer.setInterval(1000)  # Flush CSV every 1 second
+    flush_timer.setInterval(_flush_interval_ms[0])
     flush_timer.timeout.connect(csv_logger.flush)
     flush_timer.start()
+
+    def _set_log_rate_hz(hz: int) -> None:
+        """Update the CSV log rate (rows per second)."""
+        interval = max(50, 1000 // max(1, hz))  # Min 50ms (20 Hz max)
+        _flush_interval_ms[0] = interval
+        flush_timer.setInterval(interval)
+        logger.info("CSV log rate set to %d Hz (%d ms)", hz, interval)
+
+    # Expose log rate control to RunPanel if it has the attribute
+    if hasattr(run_panel, 'on_log_rate_changed'):
+        run_panel.on_log_rate_changed = _set_log_rate_hz
 
     # --- 14. Run Qt event loop ---
     logger.info("Rotax Dyno DAQ system ready.")

@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -197,6 +198,7 @@ class RunPanel(QWidget):
         self._run_manager = run_manager
         self._csv_logger = csv_logger
         self._config_manager = config_manager
+        self._on_log_rate_changed_callback = None
         self._setup_ui()
         self._refresh_run_log()
 
@@ -206,7 +208,7 @@ class RunPanel(QWidget):
         layout.setSpacing(8)
 
         # --- CSV Directory Section ---
-        csv_dir_group = QGroupBox("CSV Log Directory")
+        csv_dir_group = QGroupBox("CSV Log Settings")
         csv_dir_layout = QHBoxLayout(csv_dir_group)
 
         self._csv_dir_edit = QLineEdit()
@@ -222,6 +224,17 @@ class RunPanel(QWidget):
         self._csv_dir_browse_btn.setMinimumSize(MIN_TOUCH_TARGET_PX, MIN_TOUCH_TARGET_PX)
         self._csv_dir_browse_btn.clicked.connect(self._on_browse_csv_dir)
         csv_dir_layout.addWidget(self._csv_dir_browse_btn)
+
+        # Log rate (Hz)
+        csv_dir_layout.addWidget(QLabel("Log Rate:"))
+        self._log_rate_spinbox = QSpinBox()
+        self._log_rate_spinbox.setRange(1, 20)
+        self._log_rate_spinbox.setValue(1)
+        self._log_rate_spinbox.setSuffix(" Hz")
+        self._log_rate_spinbox.setMinimumHeight(MIN_TOUCH_TARGET_PX)
+        self._log_rate_spinbox.setToolTip("CSV rows per second (1-20 Hz)")
+        self._log_rate_spinbox.valueChanged.connect(self._on_log_rate_changed)
+        csv_dir_layout.addWidget(self._log_rate_spinbox)
 
         layout.addWidget(csv_dir_group)
 
@@ -386,6 +399,21 @@ class RunPanel(QWidget):
                     self._config_manager.set("csv_directory", str(new_path))
                 except Exception:
                     pass  # Non-critical — directory is already updated in memory
+
+    def _on_log_rate_changed(self, hz: int) -> None:
+        """Handle log rate spinbox change."""
+        if self._on_log_rate_changed_callback is not None:
+            self._on_log_rate_changed_callback(hz)
+
+    @property
+    def on_log_rate_changed(self):
+        """Callback invoked when log rate changes."""
+        return getattr(self, '_on_log_rate_changed_callback', None)
+
+    @on_log_rate_changed.setter
+    def on_log_rate_changed(self, callback):
+        """Set the callback invoked when log rate changes."""
+        self._on_log_rate_changed_callback = callback
 
     def _on_filter_changed(self) -> None:
         """Handle filter input changes - refresh the run log with filters."""
