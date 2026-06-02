@@ -431,7 +431,7 @@ def main() -> int:
 
     # --- EMA smoothing state ---
     _ema_state: dict[str, float] = {}
-    _ema_alpha = [0.3]  # Mutable container so lambda can modify
+    _ema_alpha = [1.0]  # 1.0 = no smoothing (pass-through). Lower = more smooth.
 
     # Connect EMA alpha from hardware setup panel
     hardware_setup_panel.on_ema_changed = lambda val: _ema_alpha.__setitem__(0, val)

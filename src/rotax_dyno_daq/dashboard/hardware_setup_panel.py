@@ -431,7 +431,7 @@ class HardwareSetupPanel(QWidget):
         self._ema_spinbox.setRange(0.1, 1.0)
         self._ema_spinbox.setSingleStep(0.1)
         self._ema_spinbox.setDecimals(1)
-        self._ema_spinbox.setValue(0.3)
+        self._ema_spinbox.setValue(1.0)
         self._ema_spinbox.setToolTip(
             "EMA smoothing factor (0.1=very smooth, 1.0=no smoothing)"
         )
