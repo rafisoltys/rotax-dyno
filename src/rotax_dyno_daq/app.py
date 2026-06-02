@@ -575,6 +575,12 @@ def main() -> int:
     logger.info("Started %d HAT reader(s). Channels: %s", len(hat_readers),
                 [ch.channel_id for r in hat_readers for ch in r.channels])
 
+    # --- 13a. CSV flush timer (1 Hz) ---
+    flush_timer = QtTimer()
+    flush_timer.setInterval(1000)  # Flush CSV every 1 second
+    flush_timer.timeout.connect(csv_logger.flush)
+    flush_timer.start()
+
     # --- 14. Run Qt event loop ---
     logger.info("Rotax Dyno DAQ system ready.")
     exit_code = qt_app.exec()
