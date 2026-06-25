@@ -143,6 +143,7 @@ SENSOR_PRESETS: list[SensorPreset] = [
     SensorPreset(name="Custom Range...", slope=1.0, offset=0.0, unit="V"),
     SensorPreset(name="4-20mA 0-10bar (250Ω)", slope=2.5, offset=-2.5, unit="bar"),
     SensorPreset(name="4-20mA 0-40bar (250Ω)", slope=10.0, offset=-10.0, unit="bar"),
+    SensorPreset(name="4-20mA 0-600bar (250Ω)", slope=150.0, offset=-150.0, unit="bar"),
     SensorPreset(name="Bosch 0-10 bar (0.5-4.5V)", slope=2.5, offset=-1.25, unit="bar"),
     SensorPreset(name="Generic 0-5 bar", slope=1.25, offset=-0.625, unit="bar"),
     SensorPreset(name="Innovate LC-2 λ", slope=0.2, offset=0.5, unit="λ"),
